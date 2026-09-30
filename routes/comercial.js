@@ -3,7 +3,7 @@ const express = require('express');
 const { pool, tx, uno, todos, ruta, ErrorNegocio } = require('../lib/db');
 const { puede } = require('../lib/auth');
 const N = require('../lib/negocio');
-const { actualizar, forzar } = require('./comun');
+const { forzar } = require('./comun');
 
 const router = express.Router();
 
@@ -45,63 +45,6 @@ router.post('/rentas/:id/cancelar', puede('rentas'), ruta(async (req, res) => {
 
 router.post('/rentas/:id/facturar', puede('rentas'), ruta(async (req, res) => {
     res.status(201).json(await tx((c) => N.facturarRenta(c, req.params.id, { uid: req.usuario.id, forzar: forzar(req) })));
-}));
-
-// =====================================================================
-//  SERVICIOS
-// =====================================================================
-router.get('/servicios', puede('servicios'), ruta(async (req, res) => {
-    const params = [];
-    let w = '';
-    if (req.query.estado) { params.push(req.query.estado); w = 'WHERE s.estado = $1'; }
-    res.json(await todos(pool,
-        `SELECT s.*, c.razon_social, e.numero_economico, emp.nombre AS tecnico, f.folio AS factura_folio,
-                COALESCE((SELECT SUM(cantidad * precio_unitario) FROM servicio_refacciones WHERE servicio_id = s.id), 0) AS refacciones_importe
-         FROM servicios s LEFT JOIN clientes c ON c.id = s.cliente_id LEFT JOIN equipos e ON e.id = s.equipo_id
-         LEFT JOIN empleados emp ON emp.id = s.tecnico_id LEFT JOIN facturas f ON f.id = s.factura_id
-         ${w} ORDER BY CASE s.estado WHEN 'en_proceso' THEN 0 WHEN 'abierta' THEN 1 WHEN 'terminada' THEN 2 ELSE 3 END, s.id DESC`, params));
-}));
-
-router.get('/servicios/:id', puede('servicios'), ruta(async (req, res) => {
-    const s = await uno(pool,
-        `SELECT s.*, c.razon_social, e.numero_economico, emp.nombre AS tecnico FROM servicios s
-         LEFT JOIN clientes c ON c.id = s.cliente_id LEFT JOIN equipos e ON e.id = s.equipo_id
-         LEFT JOIN empleados emp ON emp.id = s.tecnico_id WHERE s.id = $1`, [req.params.id]);
-    if (!s) throw new ErrorNegocio(404, 'Servicio no encontrado');
-    s.refacciones = await todos(pool,
-        `SELECT sr.*, p.sku, p.nombre, p.unidad FROM servicio_refacciones sr JOIN productos p ON p.id = sr.producto_id
-         WHERE sr.servicio_id = $1 ORDER BY sr.id`, [req.params.id]);
-    res.json(s);
-}));
-
-router.post('/servicios', puede('servicios'), ruta(async (req, res) => {
-    const b = req.body || {};
-    res.status(201).json(await tx((c) => N.crearServicio(c, {
-        clienteId: b.cliente_id, equipoId: b.equipo_id, equipoCliente: b.equipo_cliente, tipo: b.tipo,
-        descripcion: b.descripcion, tecnicoId: b.tecnico_id, manoObra: b.mano_obra, fechaProgramada: b.fecha_programada,
-        uid: req.usuario.id,
-    })));
-}));
-
-router.put('/servicios/:id', puede('servicios'), ruta(async (req, res) => {
-    const s = await uno(pool, 'SELECT estado FROM servicios WHERE id = $1', [req.params.id]);
-    if (!s) throw new ErrorNegocio(404, 'Servicio no encontrado');
-    if (!['abierta', 'en_proceso', 'terminada'].includes(s.estado)) throw new ErrorNegocio(409, 'La orden ya está cerrada');
-    res.json(await actualizar(pool, 'servicios', req.params.id, ['descripcion', 'tecnico_id', 'mano_obra', 'fecha_programada', 'cliente_id'], req.body));
-}));
-
-router.post('/servicios/:id/refacciones', puede('servicios'), ruta(async (req, res) => {
-    const b = req.body || {};
-    res.status(201).json(await tx((c) => N.agregarRefaccion(c, req.params.id, {
-        productoId: b.producto_id, cantidad: b.cantidad, uid: req.usuario.id })));
-}));
-
-router.post('/servicios/:id/estado', puede('servicios'), ruta(async (req, res) => {
-    res.json(await tx((c) => N.cambiarEstadoServicio(c, req.params.id, req.body.estado, { uid: req.usuario.id })));
-}));
-
-router.post('/servicios/:id/facturar', puede('facturacion'), ruta(async (req, res) => {
-    res.status(201).json(await tx((c) => N.facturarServicio(c, req.params.id, { uid: req.usuario.id, forzar: forzar(req) })));
 }));
 
 // =====================================================================
@@ -157,7 +100,8 @@ router.get('/traspasos', puede('traspasos'), ruta(async (req, res) => {
             `SELECT e.id, e.numero_economico, e.tipo, e.marca, e.modelo, e.estado, e.ubicacion,
                     (SELECT r.folio || ' · ' || c.razon_social || ' · vence ' || to_char(r.fecha_fin, 'DD/MM/YYYY') FROM rentas r JOIN clientes c ON c.id = r.cliente_id
                       WHERE r.equipo_id = e.id AND r.estado = 'activa' LIMIT 1) AS detalle_renta,
-                    (SELECT s.folio FROM servicios s WHERE s.equipo_id = e.id AND s.estado IN ('abierta','en_proceso') ORDER BY s.id DESC LIMIT 1) AS orden_servicio
+                    (SELECT ot.folio FROM ordenes_trabajo ot WHERE ot.equipo_id = e.id AND ot.tipo IN ('servicio','preventivo')
+                      AND ot.estado NOT IN ('cerrada','facturada','cancelada','rechazada') ORDER BY ot.id DESC LIMIT 1) AS orden_servicio
              FROM equipos e WHERE e.estado NOT IN ('vendido','baja') ORDER BY e.numero_economico`),
     ]);
     res.json({ historial, tablero, transiciones: N.TRANSICIONES });

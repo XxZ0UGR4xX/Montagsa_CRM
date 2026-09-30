@@ -34,7 +34,7 @@ router.get('/clientes/:id', puede('clientes'), ruta(async (req, res) => {
         N.saldoCliente(pool, id),
         todos(pool, `SELECT r.*, e.numero_economico FROM rentas r JOIN equipos e ON e.id = r.equipo_id WHERE r.cliente_id = $1 ORDER BY r.id DESC LIMIT 20`, [id]),
         todos(pool, `SELECT id, folio, origen, fecha, fecha_vencimiento, total, pagado, estado FROM facturas WHERE cliente_id = $1 ORDER BY id DESC LIMIT 20`, [id]),
-        todos(pool, `SELECT id, folio, tipo, estado, fecha_programada FROM servicios WHERE cliente_id = $1 ORDER BY id DESC LIMIT 20`, [id]),
+        todos(pool, `SELECT id, folio, tipo, estado, fecha_programada FROM ordenes_trabajo WHERE cliente_id = $1 ORDER BY id DESC LIMIT 20`, [id]),
         todos(pool, `SELECT i.*, u.nombre AS usuario FROM interacciones i LEFT JOIN usuarios u ON u.id = i.usuario_id WHERE cliente_id = $1 ORDER BY fecha DESC LIMIT 30`, [id]),
     ]);
     res.json({ ...cliente, saldo, rentas, facturas, servicios, interacciones });
@@ -95,7 +95,7 @@ router.get('/equipos/:id', puede('equipos'), ruta(async (req, res) => {
     const [traspasos, rentas, servicios] = await Promise.all([
         todos(pool, `SELECT t.*, u.nombre AS usuario FROM traspasos t LEFT JOIN usuarios u ON u.id = t.usuario_id WHERE equipo_id = $1 ORDER BY fecha DESC`, [id]),
         todos(pool, `SELECT r.*, c.razon_social FROM rentas r JOIN clientes c ON c.id = r.cliente_id WHERE equipo_id = $1 ORDER BY r.id DESC`, [id]),
-        todos(pool, `SELECT id, folio, tipo, estado, descripcion, fecha_programada FROM servicios WHERE equipo_id = $1 ORDER BY id DESC`, [id]),
+        todos(pool, `SELECT id, folio, tipo, estado, descripcion, fecha_programada FROM ordenes_trabajo WHERE equipo_id = $1 ORDER BY id DESC`, [id]),
     ]);
     res.json({ ...equipo, traspasos, rentas, servicios });
 }));
@@ -181,6 +181,35 @@ router.get('/maxmin', puede('maxmin'), ruta(async (req, res) => {
 router.post('/maxmin/generar-oc', puede('compras'), ruta(async (req, res) => {
     const creadas = await tx((c) => N.generarOCsPorMinimos(c, { productoIds: req.body && req.body.producto_ids, uid: req.usuario.id }));
     res.json({ creadas });
+}));
+
+// =====================================================================
+//  ALMACÉN · REQUISICIONES (refacciones pedidas por Producción)
+// =====================================================================
+router.get('/requisiciones', puede('requisiciones'), ruta(async (req, res) => {
+    const params = [];
+    let w = '';
+    if (req.query.estado) { params.push(req.query.estado); w = 'WHERE rq.estado = $1'; }
+    res.json(await todos(pool,
+        `SELECT rq.*, ot.folio AS ot_folio, ot.tipo AS ot_tipo, ot.descripcion AS ot_descripcion,
+                (SELECT COUNT(*)::int FROM requisicion_items i WHERE i.requisicion_id = rq.id) AS partidas
+         FROM requisiciones rq JOIN ordenes_trabajo ot ON ot.id = rq.ot_id
+         ${w} ORDER BY (rq.estado = 'pendiente') DESC, rq.id DESC LIMIT 300`, params));
+}));
+
+router.get('/requisiciones/:id', puede('requisiciones'), ruta(async (req, res) => {
+    const rq = await uno(pool,
+        `SELECT rq.*, ot.folio AS ot_folio, ot.tipo AS ot_tipo, ot.descripcion AS ot_descripcion
+         FROM requisiciones rq JOIN ordenes_trabajo ot ON ot.id = rq.ot_id WHERE rq.id = $1`, [req.params.id]);
+    if (!rq) throw new ErrorNegocio(404, 'Requisición no encontrada');
+    rq.items = await todos(pool,
+        `SELECT i.*, p.sku, p.nombre, p.unidad, p.stock FROM requisicion_items i JOIN productos p ON p.id = i.producto_id
+         WHERE i.requisicion_id = $1 ORDER BY i.id`, [req.params.id]);
+    res.json(rq);
+}));
+
+router.post('/requisiciones/:id/surtir', puede('requisiciones'), ruta(async (req, res) => {
+    res.json(await tx((c) => N.surtirRequisicion(c, req.params.id, { uid: req.usuario.id })));
 }));
 
 module.exports = router;

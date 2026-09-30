@@ -29,6 +29,7 @@ app.use('/api', comun.router);                                     // /auth/*, /
 app.use('/api', requireAuth, require('./routes/crm-almacen'));     // CRM + Almacén
 app.use('/api', requireAuth, require('./routes/comercial'));       // Comercial
 app.use('/api', requireAuth, require('./routes/administracion'));  // Administración + Dashboard
+app.use('/api', requireAuth, require('./routes/produccion'));      // Producción
 
 app.use('/api', (req, res) => res.status(404).json({ error: `Ruta no encontrada: ${req.method} ${req.originalUrl}` }));
 

@@ -16,7 +16,10 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 DROP TABLE IF EXISTS poliza_movimientos, polizas, cuentas_contables,
     pagos, factura_conceptos, facturas,
-    servicio_refacciones, servicios, rentas, traspasos,
+    requisicion_items, requisiciones,
+    equipo_preventivo, secuencia_preventivo, config_preventivo,
+    lecturas_horometro, ot_refacciones, ordenes_trabajo,
+    rentas, traspasos,
     orden_compra_items, ordenes_compra, movimientos_inventario,
     productos, equipos, empleados, interacciones, clientes,
     proveedores, usuarios CASCADE;
@@ -40,9 +43,9 @@ CREATE TABLE usuarios (
     nombre          VARCHAR(120) NOT NULL,
     email           VARCHAR(150) NOT NULL UNIQUE,
     password_hash   TEXT NOT NULL,
-    -- admin: todo · almacen · comercial · administracion
+    -- admin: todo · almacen · comercial · produccion · administracion
     rol             VARCHAR(20) NOT NULL DEFAULT 'comercial'
-                    CHECK (rol IN ('admin','almacen','comercial','administracion')),
+                    CHECK (rol IN ('admin','almacen','comercial','produccion','administracion')),
     activo          BOOLEAN NOT NULL DEFAULT TRUE,
     creado          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     actualizado     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -255,36 +258,126 @@ CREATE TABLE rentas (
 );
 
 -- =====================================================================
---  COMERCIAL · SERVICIOS (órdenes de servicio / taller)
+--  PRODUCCIÓN · ÓRDENES DE TRABAJO (rondas, preventivos, servicios,
+--  maniobras y refacciones). Una sola tabla para las 5; el flujo de
+--  estados válido por tipo se controla en lib/negocio.js.
 -- =====================================================================
-CREATE TABLE servicios (
+CREATE TABLE ordenes_trabajo (
     id                  SERIAL PRIMARY KEY,
-    folio               TEXT GENERATED ALWAYS AS ('OS-' || (1000 + id)) STORED,
-    cliente_id          INTEGER REFERENCES clientes(id),     -- NULL = servicio interno a flota propia
+    folio               TEXT GENERATED ALWAYS AS ('OT-' || (1000 + id)) STORED,
+    tipo                VARCHAR(12) NOT NULL
+                        CHECK (tipo IN ('ronda','preventivo','servicio','maniobra','refaccion')),
+    cliente_id          INTEGER REFERENCES clientes(id),     -- NULL = interno (flota propia)
     equipo_id           INTEGER REFERENCES equipos(id),      -- equipo propio de Montagsa
     equipo_cliente      VARCHAR(160),                        -- descripción si el equipo es del cliente
-    tipo                VARCHAR(15) NOT NULL
-                        CHECK (tipo IN ('preventivo','correctivo','diagnostico','instalacion')),
-    descripcion         TEXT NOT NULL,
-    tecnico_id          INTEGER REFERENCES empleados(id) ON DELETE SET NULL,
-    estado              VARCHAR(12) NOT NULL DEFAULT 'abierta'
-                        CHECK (estado IN ('abierta','en_proceso','terminada','facturada','cancelada')),
-    mano_obra           NUMERIC(10,2) NOT NULL DEFAULT 0,
+    tecnico_id          INTEGER REFERENCES empleados(id) ON DELETE SET NULL,  -- técnico u operador
+    -- Servicios: evaluacion -> requiere_cotizacion -> cotizacion_interna -> cotizacion_comercial
+    --            -> autorizada/rechazada -> en_ejecucion -> cerrada -> facturada (+ cancelada)
+    -- Maniobras: programada -> en_ruta -> entregada -> cerrada -> facturada (+ cancelada)
+    -- Rondas: se crean directamente en 'cerrada'. Preventivos y refacciones: 'abierta' -> 'cerrada' -> 'facturada'
+    estado              VARCHAR(24) NOT NULL DEFAULT 'evaluacion'
+                        CHECK (estado IN ('evaluacion','requiere_cotizacion','cotizacion_interna','cotizacion_comercial',
+                                           'autorizada','rechazada','en_ejecucion','abierta','programada','en_ruta',
+                                           'entregada','cerrada','facturada','cancelada')),
+    diagnostico         TEXT,                                -- evaluación (servicios)
+    descripcion         TEXT,
+    horometro           NUMERIC(10,1),                       -- lectura (rondas) u horómetro del servicio (preventivos)
+    mano_obra_horas     NUMERIC(6,2) NOT NULL DEFAULT 0,
+    costo_hora          NUMERIC(10,2) NOT NULL DEFAULT 0,     -- costo interno por hora de mano de obra
+    costo_refacciones   NUMERIC(12,2) NOT NULL DEFAULT 0,     -- suma de ot_refacciones al costo
+    costo_mano_obra     NUMERIC(12,2) NOT NULL DEFAULT 0,     -- mano_obra_horas * costo_hora
+    costo_interno       NUMERIC(12,2) NOT NULL DEFAULT 0,     -- costo_refacciones + costo_mano_obra (cotización interna)
+    margen              NUMERIC(12,2) NOT NULL DEFAULT 0,     -- lo agrega Comercial
+    precio_cliente      NUMERIC(12,2) NOT NULL DEFAULT 0,     -- precio autorizado (o fijado en maniobras/refacciones)
+    autorizado_por      VARCHAR(120),                         -- quién autorizó del lado del cliente
+    fecha_autorizacion  DATE,
+    origen_maniobra     VARCHAR(160),
+    destino_maniobra    VARCHAR(160),
+    unidad_transporte   VARCHAR(80),
     fecha_programada    DATE DEFAULT CURRENT_DATE,
     fecha_cierre        DATE,
     factura_id          INTEGER,
+    notas               TEXT,
     usuario_id          INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
     creado              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CHECK (equipo_id IS NOT NULL OR equipo_cliente IS NOT NULL)
+    actualizado         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (tipo IN ('ronda','preventivo') AND equipo_id IS NOT NULL) OR
+        (tipo IN ('servicio','maniobra') AND (equipo_id IS NOT NULL OR equipo_cliente IS NOT NULL)) OR
+        (tipo = 'refaccion')
+    )
 );
+CREATE TRIGGER trg_ot_fecha BEFORE UPDATE ON ordenes_trabajo
+    FOR EACH ROW EXECUTE FUNCTION actualizar_fecha();
+CREATE INDEX idx_ot_equipo ON ordenes_trabajo(equipo_id);
+CREATE INDEX idx_ot_tipo_estado ON ordenes_trabajo(tipo, estado);
 
-CREATE TABLE servicio_refacciones (
+CREATE TABLE ot_refacciones (
     id              SERIAL PRIMARY KEY,
-    servicio_id     INTEGER NOT NULL REFERENCES servicios(id) ON DELETE CASCADE,
+    ot_id           INTEGER NOT NULL REFERENCES ordenes_trabajo(id) ON DELETE CASCADE,
     producto_id     INTEGER NOT NULL REFERENCES productos(id),
     cantidad        INTEGER NOT NULL CHECK (cantidad > 0),
     costo_unitario  NUMERIC(10,2) NOT NULL,
-    precio_unitario NUMERIC(10,2) NOT NULL
+    precio_unitario NUMERIC(10,2) NOT NULL DEFAULT 0
+);
+
+-- Rondas: bitácora de lecturas de horómetro de equipos en renta
+CREATE TABLE lecturas_horometro (
+    id          SERIAL PRIMARY KEY,
+    equipo_id   INTEGER NOT NULL REFERENCES equipos(id),
+    ot_id       INTEGER REFERENCES ordenes_trabajo(id) ON DELETE SET NULL,
+    lectura     NUMERIC(10,1) NOT NULL,
+    fecha       DATE NOT NULL DEFAULT CURRENT_DATE,
+    usuario_id  INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    creado      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_lecturas_equipo ON lecturas_horometro(equipo_id);
+
+-- Preventivos: intervalo (horas) y secuencia de servicios, configurables
+CREATE TABLE config_preventivo (
+    id              SERIAL PRIMARY KEY,
+    intervalo_horas NUMERIC(6,1) NOT NULL DEFAULT 250 CHECK (intervalo_horas > 0)
+);
+
+-- > [!warning] Por verificar
+-- > El pizarrón del taller dice "4C / 1 / 4C / 1"; su significado exacto
+-- > (qué incluye cada servicio "4C" y cada servicio "1") no está confirmado.
+-- > Se cargó como ejemplo editable desde Producción › Preventivos.
+CREATE TABLE secuencia_preventivo (
+    id              SERIAL PRIMARY KEY,
+    orden           INTEGER NOT NULL UNIQUE CHECK (orden > 0),
+    nombre_servicio VARCHAR(80) NOT NULL,
+    descripcion     TEXT
+);
+
+-- En qué paso de la secuencia va cada equipo y cuándo fue su último preventivo
+CREATE TABLE equipo_preventivo (
+    equipo_id                  INTEGER PRIMARY KEY REFERENCES equipos(id) ON DELETE CASCADE,
+    paso_actual                INTEGER NOT NULL DEFAULT 1,
+    horometro_ultimo_servicio  NUMERIC(10,1) NOT NULL DEFAULT 0,
+    fecha_ultimo_servicio      DATE
+);
+
+-- Requisiciones de refacciones (Producción las genera, Almacén las surte)
+CREATE TABLE requisiciones (
+    id              SERIAL PRIMARY KEY,
+    folio           TEXT GENERATED ALWAYS AS ('RQ-' || (1000 + id)) STORED,
+    ot_id           INTEGER NOT NULL REFERENCES ordenes_trabajo(id),
+    estado          VARCHAR(12) NOT NULL DEFAULT 'pendiente'
+                    CHECK (estado IN ('pendiente','surtida','cancelada')),
+    fecha           DATE NOT NULL DEFAULT CURRENT_DATE,
+    fecha_surtido   DATE,
+    usuario_id      INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    surtido_por     INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    creado          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_requisiciones_ot ON requisiciones(ot_id);
+
+CREATE TABLE requisicion_items (
+    id              SERIAL PRIMARY KEY,
+    requisicion_id  INTEGER NOT NULL REFERENCES requisiciones(id) ON DELETE CASCADE,
+    producto_id     INTEGER NOT NULL REFERENCES productos(id),
+    cantidad        INTEGER NOT NULL CHECK (cantidad > 0)
 );
 
 -- =====================================================================
@@ -294,7 +387,7 @@ CREATE TABLE facturas (
     id                  SERIAL PRIMARY KEY,
     folio               TEXT GENERATED ALWAYS AS ('F-' || (1000 + id)) STORED,
     cliente_id          INTEGER NOT NULL REFERENCES clientes(id),
-    origen              VARCHAR(10) NOT NULL CHECK (origen IN ('renta','servicio','venta','otro')),
+    origen              VARCHAR(15) NOT NULL CHECK (origen IN ('renta','servicio','venta','otro','maniobra','refaccion_ot')),
     origen_id           INTEGER,
     fecha               DATE NOT NULL DEFAULT CURRENT_DATE,
     fecha_vencimiento   DATE NOT NULL DEFAULT CURRENT_DATE,
@@ -310,8 +403,8 @@ CREATE TABLE facturas (
 );
 CREATE INDEX idx_facturas_cliente ON facturas(cliente_id);
 
-ALTER TABLE rentas    ADD CONSTRAINT fk_rentas_factura    FOREIGN KEY (factura_id) REFERENCES facturas(id) ON DELETE SET NULL;
-ALTER TABLE servicios ADD CONSTRAINT fk_servicios_factura FOREIGN KEY (factura_id) REFERENCES facturas(id) ON DELETE SET NULL;
+ALTER TABLE rentas          ADD CONSTRAINT fk_rentas_factura FOREIGN KEY (factura_id) REFERENCES facturas(id) ON DELETE SET NULL;
+ALTER TABLE ordenes_trabajo ADD CONSTRAINT fk_ot_factura     FOREIGN KEY (factura_id) REFERENCES facturas(id) ON DELETE SET NULL;
 
 CREATE TABLE factura_conceptos (
     id              SERIAL PRIMARY KEY,
@@ -377,6 +470,7 @@ INSERT INTO usuarios (nombre, email, password_hash, rol) VALUES
 ('Administrador General', 'admin@montagsa.mx',     crypt('Admin#MG2026',  gen_salt('bf', 10)), 'admin'),
 ('Jorge Almacén',         'almacen@montagsa.mx',   crypt('Almacen#MG2026', gen_salt('bf', 10)), 'almacen'),
 ('Karla Comercial',       'comercial@montagsa.mx', crypt('Comercial#MG2026', gen_salt('bf', 10)), 'comercial'),
+('Beto Producción',       'produccion@montagsa.mx', crypt('Produccion#MG2026', gen_salt('bf', 10)), 'produccion'),
 ('Rosa Administración',   'admon@montagsa.mx',     crypt('Admon#MG2026',  gen_salt('bf', 10)), 'administracion');
 
 -- Catálogo de cuentas (simplificado)
@@ -393,6 +487,8 @@ INSERT INTO cuentas_contables (codigo, nombre, tipo) VALUES
 ('4102', 'Ingresos por servicios',       'ingreso'),
 ('4103', 'Ingresos por venta de equipo', 'ingreso'),
 ('4104', 'Otros ingresos',               'ingreso'),
+('4105', 'Ingresos por maniobras',       'ingreso'),
+('4106', 'Ingresos por venta de refacciones', 'ingreso'),
 ('5101', 'Costo de refacciones usadas',  'costo'),
 ('5102', 'Costo de equipo vendido',      'costo'),
 ('6101', 'Sueldos y salarios',           'gasto'),
@@ -456,7 +552,17 @@ INSERT INTO empleados (nombre, puesto, area, telefono, email, fecha_ingreso, sal
 ('Héctor Villalobos',   'Técnico mecánico',          'taller',         '449 100 0005', NULL,                    '2018-09-03', 16500),
 ('Iván Esparza',        'Técnico eléctrico',         'taller',         '449 100 0006', NULL,                    '2021-02-22', 15500),
 ('Miguel Ángel Lara',   'Operador de entregas',      'almacen',        '449 100 0007', NULL,                    '2020-11-09', 12500),
-('Daniela Robles',      'Auxiliar de cobranza',      'administracion', '449 100 0008', 'cobranza@montagsa.mx',  '2023-04-17', 13500);
+('Daniela Robles',      'Auxiliar de cobranza',      'administracion', '449 100 0008', 'cobranza@montagsa.mx',  '2023-04-17', 13500),
+('Beto Producción',      'Supervisor de taller',      'taller',         '449 100 0009', 'produccion@montagsa.mx','2014-02-10', 24000);
+
+-- Producción: intervalo y secuencia de mantenimiento preventivo
+INSERT INTO config_preventivo (intervalo_horas) VALUES (250);
+
+INSERT INTO secuencia_preventivo (orden, nombre_servicio, descripcion) VALUES
+(1, '4C', 'Servicio de 4 componentes: cambio de aceite de motor, filtro de aceite, filtro de aire y filtro hidráulico [POR CONFIRMAR]'),
+(2, '1',  'Servicio 1: revisión general, engrasado y ajuste de frenos [POR CONFIRMAR]'),
+(3, '4C', 'Servicio de 4 componentes: cambio de aceite de motor, filtro de aceite, filtro de aire y filtro hidráulico [POR CONFIRMAR]'),
+(4, '1',  'Servicio 1: revisión general, engrasado y ajuste de frenos [POR CONFIRMAR]');
 
 -- Póliza de apertura: capital inicial en bancos, flota e inventario
 DO $$
@@ -481,4 +587,5 @@ SELECT 'usuarios' AS tabla, COUNT(*) FROM usuarios
 UNION ALL SELECT 'clientes', COUNT(*) FROM clientes
 UNION ALL SELECT 'equipos', COUNT(*) FROM equipos
 UNION ALL SELECT 'productos', COUNT(*) FROM productos
-UNION ALL SELECT 'empleados', COUNT(*) FROM empleados;
+UNION ALL SELECT 'empleados', COUNT(*) FROM empleados
+UNION ALL SELECT 'secuencia_preventivo', COUNT(*) FROM secuencia_preventivo;

@@ -1,6 +1,6 @@
 // Comercial · Facturación: facturas de rentas, servicios, venta de equipo y manuales.
 // Nota: es una factura interna (no timbrada ante el SAT).
-const ORIGENES = [['renta', 'Renta'], ['servicio', 'Servicio'], ['venta', 'Venta de equipo'], ['otro', 'Otro']];
+const ORIGENES = [['renta', 'Renta'], ['servicio', 'Servicio'], ['venta', 'Venta de equipo'], ['maniobra', 'Maniobra'], ['refaccion_ot', 'Venta de refacciones'], ['otro', 'Otro']];
 let facturas = [];
 
 window.iniciar = async (cont) => {
@@ -13,6 +13,7 @@ window.iniciar = async (cont) => {
                 ${['pendiente', 'parcial', 'pagada', 'cancelada'].map((e) => `<option value="${e}">${etiqueta(e)}</option>`).join('')}</select>
             <select id="f-origen" aria-label="Origen"><option value="">Todos los orígenes</option>${ORIGENES.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select>
         </div>
+        <div id="pendientes" style="margin-bottom:18px"></div>
         <div id="kpis"></div>
         <div class="panel" id="tabla"></div>`;
     document.getElementById('btn-manual').onclick = manual;
@@ -27,8 +28,37 @@ window.iniciar = async (cont) => {
         const b = e.target.closest('button[data-id]');
         if (b) detalle(b.dataset.id);
     });
+    await cargarPendientes();
     await cargar();
 };
+
+const TIPO_OT_TXT = { servicio: 'Servicio', maniobra: 'Maniobra', refaccion: 'Refacciones' };
+
+async function cargarPendientes() {
+    const pend = await api('/ot/pendientes-facturar');
+    const cont = document.getElementById('pendientes');
+    if (!pend.length) { cont.innerHTML = ''; return; }
+    cont.innerHTML = `<div class="panel">
+        <div class="panel-cab"><h2>Por facturar (Producción)</h2></div>
+        ${tabla({
+            columnas: [
+                { t: 'Folio', r: (o) => `<strong>${esc(o.folio)}</strong>` },
+                { t: 'Cliente', k: 'razon_social' },
+                { t: 'Tipo', r: (o) => esc(TIPO_OT_TXT[o.tipo] || o.tipo) },
+                { t: 'Descripción', r: (o) => esc(o.descripcion || (o.origen_maniobra ? `${o.origen_maniobra} → ${o.destino_maniobra}` : o.numero_economico || '—')) },
+                { t: 'Precio', num: true, r: (o) => dinero(o.precio_cliente) },
+                { t: '', clase: 'acciones', r: (o) => `<button class="btn btn-chico btn-primario" type="button" data-fact="${o.id}">Facturar</button>` },
+            ],
+            filas: pend,
+        })}
+    </div>`;
+    cont.querySelectorAll('[data-fact]').forEach((b) => {
+        b.onclick = async () => {
+            const f = await conAutorizacion((body) => api(`/ot/${b.dataset.fact}/facturar`, { method: 'POST', body }), {});
+            if (f) { aviso(`Factura ${f.folio} generada`, 'ok'); await cargarPendientes(); await cargar(); }
+        };
+    });
+}
 
 async function cargar() {
     const q = `?estado=${document.getElementById('f-estado').value}&origen=${document.getElementById('f-origen').value}`;

@@ -51,28 +51,106 @@ async function main() {
         const f4 = await N.facturarRenta(c, r4.id, { uid, fecha: dias(-9) });
         await N.registrarPago(c, f4.id, { monto: f4.total, metodo: 'cheque', referencia: 'CH 004512', fecha: dias(-3), uid });
         const fin = await N.finalizarRenta(c, r4.id, { horometroRegreso: 12931.4, destino: 'reparacion', notas: 'Fuga en cilindro de inclinación', fecha: dias(-2), uid });
-        await c.query('UPDATE servicios SET tecnico_id = $1 WHERE id = $2', [await tec('Héctor Villalobos'), fin.servicio.id]);
-        await N.cambiarEstadoServicio(c, fin.servicio.id, 'en_proceso', { uid });
-        await N.agregarRefaccion(c, fin.servicio.id, { productoId: await prod('CON-ACE-012'), cantidad: 1, uid });
+        await c.query('UPDATE ordenes_trabajo SET tecnico_id = $1 WHERE id = $2', [await tec('Héctor Villalobos'), fin.ot.id]);
+        await N.guardarEvaluacion(c, fin.ot.id, { diagnostico: 'Fuga confirmada en el cilindro de inclinación', uid });
 
-        // --- Servicios a clientes ------------------------------------------
-        const s1 = await N.crearServicio(c, {
-            clienteId: await cli('FCE110304IJ5'), equipoCliente: 'Montacargas eléctrico Crown RC5500 (propiedad del cliente)',
-            tipo: 'preventivo', descripcion: 'Mantenimiento preventivo de 500 horas', tecnicoId: await tec('Iván Esparza'), manoObra: 2800, uid });
-        await N.cambiarEstadoServicio(c, s1.id, 'en_proceso', { uid });
-        await N.agregarRefaccion(c, s1.id, { productoId: await prod('REF-FIL-HI03'), cantidad: 1, uid });
-        await N.agregarRefaccion(c, s1.id, { productoId: await prod('CON-GRA-014'), cantidad: 2, uid });
-        await N.cambiarEstadoServicio(c, s1.id, 'terminada', { uid });
-        // Frigoríficos tiene el crédito suspendido: el admin autoriza la factura
-        await N.facturarServicio(c, s1.id, { uid, forzar: true, fecha: dias(-35) });
+        // --- Producción: rondas de horómetro (equipos en renta) ------------
+        await N.registrarLecturaHorometro(c, await eq('MG-001'), { lectura: 8295.0, uid });
+        await N.registrarLecturaHorometro(c, await eq('MG-012'), { lectura: 7040.0, uid });
 
-        await N.crearServicio(c, {
-            clienteId: await cli('TSM180522GH4'), equipoCliente: 'Patín hidráulico Uline (cliente)', tipo: 'diagnostico',
-            descripcion: 'No levanta carga; revisar bomba', tecnicoId: await tec('Héctor Villalobos'), manoObra: 650, fechaProgramada: dias(1), uid });
+        // --- Producción: preventivos ----------------------------------------
+        // MG-005: se le hace un preventivo y luego avanza el horómetro -> queda "próximo"
+        const otPrev = await N.generarOTPreventiva(c, await eq('MG-005'), { tecnicoId: await tec('Héctor Villalobos'), uid });
+        await N.cerrarOTPreventiva(c, otPrev.id, { horometro: 2150.0, uid });
+        await N.registrarLecturaHorometro(c, await eq('MG-005'), { lectura: 2385.0, uid });
+        // MG-003 nunca ha tenido preventivo: con 10,450 h queda "vencido" tal cual
 
-        // Preventivo a flota propia (MG-003 pasa a reparación mientras dura)
-        await N.crearServicio(c, { equipoId: await eq('MG-003'), tipo: 'preventivo', descripcion: 'Preventivo 10,500 h: cambio de aceite y filtros',
-            tecnicoId: await tec('Iván Esparza'), uid });
+        // --- Producción: servicios en cada etapa del flujo ------------------
+        // Evaluación
+        await N.crearOTServicio(c, {
+            clienteId: await cli('TSM180522GH4'), equipoCliente: 'Patín hidráulico Uline (cliente)',
+            descripcion: 'No levanta carga; revisar bomba', tecnicoId: await tec('Héctor Villalobos'), uid });
+
+        // Requiere cotización
+        const otB = await N.crearOTServicio(c, {
+            clienteId: await cli('DLP120110EF3'), equipoCliente: 'Montacargas Clark GPS25 (cliente)',
+            descripcion: 'Fuga de aceite hidráulico en el mástil', tecnicoId: await tec('Iván Esparza'), uid });
+        await N.guardarEvaluacion(c, otB.id, { diagnostico: 'Sello de mástil dañado; requiere refacción y mano de obra', uid });
+
+        // Cotización interna
+        const otC = await N.crearOTServicio(c, {
+            clienteId: await cli('AHI090807CD2'), equipoCliente: 'Montacargas Nissan (cliente)',
+            descripcion: 'Ruido en la transmisión', tecnicoId: await tec('Héctor Villalobos'), uid });
+        await N.guardarEvaluacion(c, otC.id, { diagnostico: 'Rodamiento de transmisión desgastado', uid });
+        await N.guardarCotizacionInterna(c, otC.id, { horas: 3, costoHora: 180, uid });
+        await N.agregarRefaccionCotizacion(c, otC.id, { productoId: await prod('REF-RUL-011'), cantidad: 1, uid });
+
+        // Cotización comercial (esperando el precio y la autorización de Comercial)
+        const otD = await N.crearOTServicio(c, {
+            clienteId: await cli('CAL160918KL6'), equipoCliente: 'Plataforma elevadora Genie GS-1930 (cliente)',
+            descripcion: 'Falla en el sistema hidráulico de elevación', tecnicoId: await tec('Iván Esparza'), uid });
+        await N.guardarEvaluacion(c, otD.id, { diagnostico: 'Bomba hidráulica requiere reemplazo de sellos', uid });
+        await N.guardarCotizacionInterna(c, otD.id, { horas: 4, costoHora: 180, uid });
+        await N.agregarRefaccionCotizacion(c, otD.id, { productoId: await prod('CON-ACE-012'), cantidad: 1, uid });
+        await N.enviarCotizacionComercial(c, otD.id, { uid });
+
+        // Autorizada (Frigoríficos tiene el crédito suspendido, pero autorizar no revisa crédito: eso es al facturar)
+        const otE = await N.crearOTServicio(c, {
+            clienteId: await cli('FCE110304IJ5'), equipoCliente: 'Montacargas eléctrico Crown RC5500 (cliente)',
+            descripcion: 'Mantenimiento correctivo de frenos', tecnicoId: await tec('Iván Esparza'), uid });
+        await N.guardarEvaluacion(c, otE.id, { diagnostico: 'Balatas y disco de freno desgastados', uid });
+        await N.guardarCotizacionInterna(c, otE.id, { horas: 2, costoHora: 180, uid });
+        await N.agregarRefaccionCotizacion(c, otE.id, { productoId: await prod('REF-FIL-HI03'), cantidad: 1, uid });
+        await N.enviarCotizacionComercial(c, otE.id, { uid });
+        await N.capturarCotizacionComercial(c, otE.id, { margen: 500, precioCliente: 1800, uid });
+        await N.autorizarOT(c, otE.id, { autorizadoPor: 'Ing. Luis Medina', fecha: dias(-1), uid });
+
+        // En ejecución (equipo propio MG-002 pasa a reparación; requisición pendiente de surtir)
+        const otF = await N.crearOTServicio(c, {
+            clienteId: await cli('LBA150312AB1'), equipoId: await eq('MG-002'),
+            descripcion: 'Servicio correctivo: falla en el sistema de dirección', tecnicoId: await tec('Héctor Villalobos'), uid });
+        await N.guardarEvaluacion(c, otF.id, { diagnostico: 'Bomba de dirección hidráulica dañada', uid });
+        await N.guardarCotizacionInterna(c, otF.id, { horas: 3, costoHora: 180, uid });
+        await N.agregarRefaccionCotizacion(c, otF.id, { productoId: await prod('CON-ACE-012'), cantidad: 1, uid });
+        await N.enviarCotizacionComercial(c, otF.id, { uid });
+        await N.capturarCotizacionComercial(c, otF.id, { margen: 600, precioCliente: 2200, uid });
+        await N.autorizarOT(c, otF.id, { autorizadoPor: 'Ing. Marco Ruiz', fecha: dias(-1), uid });
+        await N.iniciarEjecucionOT(c, otF.id, { uid });
+
+        // Cerrada y facturada: ciclo completo de evaluación a facturada
+        const otG = await N.crearOTServicio(c, {
+            clienteId: await cli('DLP120110EF3'), equipoId: await eq('MG-005'),
+            descripcion: 'Servicio correctivo: ruido en el motor', tecnicoId: await tec('Iván Esparza'), uid });
+        await N.guardarEvaluacion(c, otG.id, { diagnostico: 'Banda de alternador floja', uid });
+        await N.guardarCotizacionInterna(c, otG.id, { horas: 1, costoHora: 180, uid });
+        await N.agregarRefaccionCotizacion(c, otG.id, { productoId: await prod('REF-BAN-005'), cantidad: 1, uid });
+        await N.enviarCotizacionComercial(c, otG.id, { uid });
+        await N.capturarCotizacionComercial(c, otG.id, { margen: 300, precioCliente: 900, uid });
+        await N.autorizarOT(c, otG.id, { autorizadoPor: 'Sr. Tomás Gallegos', fecha: dias(-2), uid });
+        await N.iniciarEjecucionOT(c, otG.id, { uid });
+        const rqG = await uno(c, `SELECT id FROM requisiciones WHERE ot_id = $1`, [otG.id]);
+        await N.surtirRequisicion(c, rqG.id, { uid });
+        await N.cerrarOT(c, otG.id, { uid });
+        await N.facturarOT(c, otG.id, { uid, fecha: dias(-1) });
+
+        // --- Producción: maniobra (ciclo completo hasta facturada) ----------
+        const otM = await N.crearManiobra(c, {
+            clienteId: await cli('CAL160918KL6'), equipoCliente: 'Grúa telescópica (cliente)',
+            origen: 'Patio Montagsa', destino: 'Obra Altavista, Blvd. Siglo XXI', fechaProgramada: dias(-3),
+            operadorId: await tec('Miguel Ángel Lara'), unidadTransporte: 'Plataforma Kenworth T370', costoInterno: 1800, precioCliente: 3200, uid });
+        await N.cambiarEstadoManiobra(c, otM.id, 'en_ruta', { uid });
+        await N.cambiarEstadoManiobra(c, otM.id, 'entregada', { uid });
+        await N.cambiarEstadoManiobra(c, otM.id, 'cerrada', { uid });
+        await N.facturarOT(c, otM.id, { uid, fecha: dias(-2) });
+
+        // --- Producción: venta de refacciones (ciclo completo) --------------
+        const otR = await N.crearOTRefaccion(c, {
+            clienteId: await cli('LBA150312AB1'),
+            items: [{ productoId: await prod('REF-BUJ-004'), cantidad: 4 }, { productoId: await prod('CON-ACE-013'), cantidad: 2 }], uid });
+        const rqR = await uno(c, `SELECT id FROM requisiciones WHERE ot_id = $1`, [otR.id]);
+        await N.surtirRequisicion(c, rqR.id, { uid });
+        await N.cerrarOT(c, otR.id, { uid });
+        await N.facturarOT(c, otR.id, { uid, fecha: dias(-1) });
 
         // --- Traspasos y venta ---------------------------------------------
         await N.traspasar(c, await eq('MG-009'), 'venta', { motivo: 'Se pone a la venta por renovación de patines', referencia: 'MANUAL', uid });

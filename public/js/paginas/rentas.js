@@ -119,7 +119,7 @@ function finalizar(r) {
         titulo: `Finalizar ${r.folio}`, cuerpo: formulario(campos),
         acciones: [{ texto: 'Cancelar' }, { texto: 'Finalizar renta', clase: 'btn-primario', onClick: async (m) => {
             const res = await api(`/rentas/${r.id}/finalizar`, { method: 'POST', body: leerFormulario(m, campos) });
-            aviso(res.servicio ? `Renta finalizada. Se abrió la orden ${res.servicio.folio}` : 'Renta finalizada', 'ok');
+            aviso(res.ot ? `Renta finalizada. Se abrió la orden ${res.ot.folio} (evaluación en Producción)` : 'Renta finalizada', 'ok');
             await cargar();
         } }],
     });

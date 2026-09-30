@@ -2,7 +2,7 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const { pool, uno, todos, ruta, ErrorNegocio } = require('../lib/db');
-const { firmar, requireAuth, puede, seccionesDe } = require('../lib/auth');
+const { firmar, requireAuth, puede, seccionesDe, PERMISOS } = require('../lib/auth');
 
 /** INSERT con solo los campos permitidos que vengan en el body. */
 async function insertar(db, tabla, campos, body) {
@@ -86,17 +86,39 @@ router.put('/usuarios/:id', requireAuth, puede('usuarios'), ruta(async (req, res
 }));
 
 // ------------------------------------------------------------- Catálogos para selects
-// Cualquier usuario con sesión: los formularios de cada área los necesitan.
+// Cualquier usuario con sesión, pero cada rol solo recibe lo que su área necesita
+// (p. ej. Producción no recibe saldos de clientes ni límites de crédito).
 router.get('/catalogos', requireAuth, ruta(async (req, res) => {
-    const [clientes, equipos, productos, proveedores, tecnicos] = await Promise.all([
-        todos(pool, `SELECT id, razon_social, etapa, credito_estado, dias_credito FROM clientes ORDER BY razon_social`),
-        todos(pool, `SELECT id, numero_economico, tipo, marca, modelo, estado, horometro, tarifa_diaria, tarifa_semanal,
-                            tarifa_mensual, precio_venta FROM equipos ORDER BY numero_economico`),
-        todos(pool, `SELECT id, sku, nombre, unidad, stock, costo, precio, proveedor_id FROM productos WHERE activo ORDER BY sku`),
-        todos(pool, `SELECT id, nombre FROM proveedores WHERE activo ORDER BY nombre`),
-        todos(pool, `SELECT id, nombre, puesto FROM empleados WHERE estado = 'activo' AND area = 'taller' ORDER BY nombre`),
-    ]);
-    res.json({ clientes, equipos, productos, proveedores, tecnicos });
+    const rol = req.usuario.rol;
+    const tiene = (...secciones) => rol === 'admin' || secciones.some((s) => (PERMISOS[s] || []).includes(rol));
+    const out = {};
+
+    if (tiene('clientes', 'rentas', 'cotizaciones')) {
+        out.clientes = await todos(pool, `SELECT id, razon_social, etapa, credito_estado, dias_credito FROM clientes ORDER BY razon_social`);
+    } else if (tiene('ordenes_trabajo', 'maniobras', 'refacciones_ot')) {
+        out.clientes = await todos(pool, `SELECT id, razon_social FROM clientes ORDER BY razon_social`);
+    }
+
+    if (tiene('equipos')) {
+        out.equipos = rol === 'produccion'
+            ? await todos(pool, `SELECT id, numero_economico, tipo, marca, modelo, estado, horometro, ubicacion FROM equipos ORDER BY numero_economico`)
+            : await todos(pool, `SELECT id, numero_economico, tipo, marca, modelo, estado, horometro, tarifa_diaria, tarifa_semanal,
+                                        tarifa_mensual, precio_venta FROM equipos ORDER BY numero_economico`);
+    }
+
+    if (tiene('inventario', 'maxmin', 'ordenes_trabajo', 'refacciones_ot')) {
+        out.productos = await todos(pool, `SELECT id, sku, nombre, unidad, stock, costo, precio, proveedor_id FROM productos WHERE activo ORDER BY sku`);
+    }
+
+    if (tiene('proveedores', 'compras', 'inventario')) {
+        out.proveedores = await todos(pool, `SELECT id, nombre FROM proveedores WHERE activo ORDER BY nombre`);
+    }
+
+    if (tiene('ordenes_trabajo', 'rondas', 'preventivos', 'maniobras')) {
+        out.tecnicos = await todos(pool, `SELECT id, nombre, puesto FROM empleados WHERE estado = 'activo' AND area = 'taller' ORDER BY nombre`);
+    }
+
+    res.json(out);
 }));
 
 module.exports = { router, insertar, actualizar, forzar };

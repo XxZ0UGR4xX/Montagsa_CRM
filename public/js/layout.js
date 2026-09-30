@@ -8,12 +8,20 @@ const MENU = [
         ['inventario', 'Inventario', '/almacen/inventario.html'],
         ['maxmin', 'Máximos y mínimos', '/almacen/maximos-minimos.html'],
         ['movimientos', 'Movimientos', '/almacen/movimientos.html'],
+        ['requisiciones', 'Requisiciones', '/almacen/requisiciones.html'],
     ] },
     { grupo: 'Comercial', items: [
         ['rentas', 'Rentas', '/comercial/rentas.html'],
-        ['servicios', 'Servicios', '/comercial/servicios.html'],
+        ['cotizaciones', 'Cotizaciones', '/comercial/cotizaciones.html'],
         ['facturacion', 'Facturación', '/comercial/facturacion.html'],
         ['traspasos', 'Traspasos', '/comercial/traspasos.html'],
+    ] },
+    { grupo: 'Producción', items: [
+        ['ordenes_trabajo', 'Órdenes de trabajo', '/produccion/ordenes-trabajo.html'],
+        ['rondas', 'Rondas', '/produccion/rondas.html'],
+        ['preventivos', 'Preventivos', '/produccion/preventivos.html'],
+        ['maniobras', 'Maniobras', '/produccion/maniobras.html'],
+        ['refacciones_ot', 'Refacciones', '/produccion/refacciones.html'],
     ] },
     { grupo: 'Administración', items: [
         ['compras', 'Compras', '/administracion/compras.html'],
@@ -30,7 +38,7 @@ const MENU = [
     { grupo: 'Configuración', items: [['usuarios', 'Usuarios y roles', '/config/usuarios.html']] },
 ];
 
-const ROLES = { admin: 'Administrador', almacen: 'Almacén', comercial: 'Comercial', administracion: 'Administración' };
+const ROLES = { admin: 'Administrador', almacen: 'Almacén', comercial: 'Comercial', produccion: 'Producción', administracion: 'Administración' };
 
 function encabezado(titulo, subtitulo = '', acciones = '') {
     return `<div class="encabezado">

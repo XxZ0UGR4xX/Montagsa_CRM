@@ -99,6 +99,16 @@ const ESTADOS = {
     agotado: ['Agotado', 'rojo'], bajo_minimo: ['Bajo mínimo', 'naranja'], sobre_maximo: ['Sobre máximo', 'violeta'], ok: ['En rango', 'verde'],
     // empleados
     alta: ['Activo', 'verde'],
+    // órdenes de trabajo (Producción)
+    evaluacion: ['Evaluación', 'azul'], requiere_cotizacion: ['Requiere cotización', 'naranja'],
+    cotizacion_interna: ['Cotización interna', 'naranja'], cotizacion_comercial: ['Cotización comercial', 'violeta'],
+    autorizada: ['Autorizada', 'verde'], rechazada: ['Rechazada', 'rojo'], en_ejecucion: ['En ejecución', 'azul'],
+    cerrada: ['Cerrada', 'gris'],
+    programada: ['Programada', 'azul'], en_ruta: ['En ruta', 'naranja'], entregada: ['Entregada', 'verde'],
+    // preventivos
+    vencido: ['Vencido', 'rojo'], proximo: ['Próximo', 'naranja'], en_rango: ['En rango', 'verde'],
+    // requisiciones
+    surtida: ['Surtida', 'verde'],
 };
 function tag(estado, texto) {
     const [t, c] = ESTADOS[estado] || [estado, 'gris'];

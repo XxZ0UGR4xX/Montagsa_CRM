@@ -94,8 +94,8 @@ async function ver(id) {
             ${tabla({ vacio: 'Nunca se ha rentado', filas: e.rentas, columnas: [
                 { t: 'Folio', k: 'folio' }, { t: 'Cliente', k: 'razon_social' }, { t: 'Del', r: (r) => fecha(r.fecha_inicio) }, { t: 'Al', r: (r) => fecha(r.fecha_fin) },
                 { t: 'Importe', num: true, r: (r) => dinero(r.importe) }, { t: 'Estado', r: (r) => tag(r.estado) }] })}
-            <h4 style="margin:18px 0 8px">Servicios</h4>
-            ${tabla({ vacio: 'Sin órdenes de servicio', filas: e.servicios, columnas: [
+            <h4 style="margin:18px 0 8px">Órdenes de trabajo</h4>
+            ${tabla({ vacio: 'Sin órdenes de trabajo', filas: e.servicios, columnas: [
                 { t: 'Folio', k: 'folio' }, { t: 'Tipo', k: 'tipo' }, { t: 'Descripción', k: 'descripcion' }, { t: 'Estado', r: (s) => tag(s.estado) }] })}`,
     });
 }

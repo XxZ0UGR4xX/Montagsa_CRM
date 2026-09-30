@@ -122,7 +122,8 @@ const CAMPOS_EMP = ['nombre', 'puesto', 'area', 'telefono', 'email', 'fecha_ingr
 
 router.get('/empleados', puede('rrhh'), ruta(async (req, res) => {
     const empleados = await todos(pool,
-        `SELECT e.*, (SELECT COUNT(*)::int FROM servicios s WHERE s.tecnico_id = e.id AND s.estado IN ('abierta','en_proceso')) AS ordenes_abiertas
+        `SELECT e.*, (SELECT COUNT(*)::int FROM ordenes_trabajo ot WHERE ot.tecnico_id = e.id
+                      AND ot.estado NOT IN ('cerrada','facturada','cancelada','rechazada')) AS ordenes_abiertas
          FROM empleados e ORDER BY e.estado, e.area, e.nombre`);
     const nominas = await todos(pool,
         `SELECT p.folio, p.fecha, p.referencia, p.concepto, SUM(m.cargo) AS total FROM polizas p
@@ -214,40 +215,95 @@ router.get('/contabilidad/resultados', puede('contabilidad'), ruta(async (req, r
 }));
 
 // =====================================================================
-//  DASHBOARD GENERAL
+//  DASHBOARD GENERAL — cada rol ve solo los KPIs de su área
 // =====================================================================
 router.get('/dashboard', puede('dashboard'), ruta(async (req, res) => {
-    const [flota, rentas, vencen, servicios, minimos, cartera, mes, tops] = await Promise.all([
-        todos(pool, `SELECT estado, COUNT(*)::int AS n FROM equipos GROUP BY estado`),
-        uno(pool, `SELECT COUNT(*)::int AS activas, COALESCE(SUM(importe),0) AS importe FROM rentas WHERE estado = 'activa'`),
-        todos(pool,
-            `SELECT r.id, r.folio, r.fecha_fin, (r.fecha_fin - CURRENT_DATE) AS dias, c.razon_social, e.numero_economico
-             FROM rentas r JOIN clientes c ON c.id = r.cliente_id JOIN equipos e ON e.id = r.equipo_id
-             WHERE r.estado = 'activa' AND r.fecha_fin <= CURRENT_DATE + 7 ORDER BY r.fecha_fin`),
-        todos(pool, `SELECT estado, COUNT(*)::int AS n FROM servicios WHERE estado IN ('abierta','en_proceso','terminada') GROUP BY estado`),
-        todos(pool,
-            `SELECT id, sku, nombre, stock, minimo, maximo FROM productos
-             WHERE activo AND stock <= minimo ORDER BY (stock::float / NULLIF(minimo,0)) NULLS FIRST LIMIT 8`),
-        uno(pool,
-            `SELECT COALESCE(SUM(total - pagado),0) AS total,
-                    COALESCE(SUM(total - pagado) FILTER (WHERE fecha_vencimiento < CURRENT_DATE),0) AS vencida
-             FROM facturas WHERE estado IN ('pendiente','parcial')`),
-        uno(pool,
-            `SELECT COALESCE((SELECT SUM(total) FROM facturas WHERE estado <> 'cancelada' AND date_trunc('month', fecha) = date_trunc('month', CURRENT_DATE)),0) AS facturado,
-                    COALESCE((SELECT SUM(monto) FROM pagos WHERE date_trunc('month', fecha) = date_trunc('month', CURRENT_DATE)),0) AS cobrado`),
-        todos(pool,
-            `SELECT c.razon_social, SUM(f.total) AS total FROM facturas f JOIN clientes c ON c.id = f.cliente_id
-             WHERE f.estado <> 'cancelada' GROUP BY c.id ORDER BY total DESC LIMIT 5`),
-    ]);
-    const porEstado = Object.fromEntries(flota.map((f) => [f.estado, f.n]));
-    const operativos = ['disponible', 'renta', 'reparacion', 'venta'].reduce((s, k) => s + (porEstado[k] || 0), 0);
-    res.json({
-        flota: porEstado,
-        utilizacion: operativos ? Math.round(((porEstado.renta || 0) / operativos) * 100) : 0,
-        rentas, rentas_por_vencer: vencen,
-        servicios: Object.fromEntries(servicios.map((s) => [s.estado, s.n])),
-        bajo_minimo: minimos, cartera, mes, top_clientes: tops,
-    });
+    const rol = req.usuario.rol;
+    const ver = (...roles) => rol === 'admin' || roles.includes(rol);
+    const datos = { rol };
+
+    if (ver('almacen')) {
+        const [flota, minimos] = await Promise.all([
+            todos(pool, `SELECT estado, COUNT(*)::int AS n FROM equipos GROUP BY estado`),
+            todos(pool,
+                `SELECT id, sku, nombre, stock, minimo, maximo FROM productos
+                 WHERE activo AND stock <= minimo ORDER BY (stock::float / NULLIF(minimo,0)) NULLS FIRST LIMIT 8`),
+        ]);
+        const porEstado = Object.fromEntries(flota.map((f) => [f.estado, f.n]));
+        const operativos = ['disponible', 'renta', 'reparacion', 'venta'].reduce((s, k) => s + (porEstado[k] || 0), 0);
+        datos.flota = porEstado;
+        datos.utilizacion = operativos ? Math.round(((porEstado.renta || 0) / operativos) * 100) : 0;
+        datos.bajo_minimo = minimos;
+        datos.requisiciones_pendientes = (await uno(pool, `SELECT COUNT(*)::int AS n FROM requisiciones WHERE estado = 'pendiente'`)).n;
+    }
+
+    if (ver('comercial')) {
+        const [rentas, vencen, cartera, mes, tops, cotPend] = await Promise.all([
+            uno(pool, `SELECT COUNT(*)::int AS activas, COALESCE(SUM(importe),0) AS importe FROM rentas WHERE estado = 'activa'`),
+            todos(pool,
+                `SELECT r.id, r.folio, r.fecha_fin, (r.fecha_fin - CURRENT_DATE) AS dias, c.razon_social, e.numero_economico
+                 FROM rentas r JOIN clientes c ON c.id = r.cliente_id JOIN equipos e ON e.id = r.equipo_id
+                 WHERE r.estado = 'activa' AND r.fecha_fin <= CURRENT_DATE + 7 ORDER BY r.fecha_fin`),
+            uno(pool,
+                `SELECT COALESCE(SUM(total - pagado),0) AS total,
+                        COALESCE(SUM(total - pagado) FILTER (WHERE fecha_vencimiento < CURRENT_DATE),0) AS vencida
+                 FROM facturas WHERE estado IN ('pendiente','parcial')`),
+            uno(pool,
+                `SELECT COALESCE((SELECT SUM(total) FROM facturas WHERE estado <> 'cancelada' AND date_trunc('month', fecha) = date_trunc('month', CURRENT_DATE)),0) AS facturado,
+                        COALESCE((SELECT SUM(monto) FROM pagos WHERE date_trunc('month', fecha) = date_trunc('month', CURRENT_DATE)),0) AS cobrado`),
+            todos(pool,
+                `SELECT c.razon_social, SUM(f.total) AS total FROM facturas f JOIN clientes c ON c.id = f.cliente_id
+                 WHERE f.estado <> 'cancelada' GROUP BY c.id ORDER BY total DESC LIMIT 5`),
+            uno(pool, `SELECT COUNT(*)::int AS n FROM ordenes_trabajo WHERE tipo = 'servicio' AND estado = 'cotizacion_comercial'`),
+        ]);
+        datos.rentas = rentas;
+        datos.rentas_por_vencer = vencen;
+        datos.cartera = cartera;
+        datos.mes = mes;
+        datos.top_clientes = tops;
+        datos.cotizaciones_pendientes = cotPend.n;
+    }
+
+    if (ver('produccion')) {
+        const [ot, preventivos, rondasPend, maniobras] = await Promise.all([
+            todos(pool, `SELECT tipo, estado, COUNT(*)::int AS n FROM ordenes_trabajo
+                         WHERE tipo IN ('servicio','maniobra','refaccion') AND estado NOT IN ('cerrada','facturada','cancelada','rechazada')
+                         GROUP BY tipo, estado`),
+            uno(pool,
+                `SELECT COUNT(*) FILTER (WHERE (COALESCE(ep.horometro_ultimo_servicio,0) + cfg.intervalo_horas - e.horometro) <= 0)::int AS vencidos,
+                        COUNT(*) FILTER (WHERE (COALESCE(ep.horometro_ultimo_servicio,0) + cfg.intervalo_horas - e.horometro) BETWEEN 0.01 AND 25)::int AS proximos
+                 FROM equipos e LEFT JOIN equipo_preventivo ep ON ep.equipo_id = e.id
+                 CROSS JOIN (SELECT intervalo_horas FROM config_preventivo ORDER BY id LIMIT 1) cfg
+                 WHERE e.estado NOT IN ('vendido','baja')`),
+            uno(pool,
+                `SELECT COUNT(*)::int AS n FROM equipos e WHERE e.estado = 'renta'
+                 AND (
+                    (SELECT MAX(l.fecha) FROM lecturas_horometro l WHERE l.equipo_id = e.id) IS NULL
+                    OR (CURRENT_DATE - (SELECT MAX(l.fecha) FROM lecturas_horometro l WHERE l.equipo_id = e.id)) > 7
+                 )`),
+            uno(pool, `SELECT COUNT(*)::int AS n FROM ordenes_trabajo WHERE tipo = 'maniobra' AND estado IN ('programada','en_ruta')`),
+        ]);
+        datos.ot_abiertas = ot;
+        datos.preventivos = { vencidos: preventivos.vencidos, proximos: preventivos.proximos };
+        datos.rondas_pendientes = rondasPend.n;
+        datos.maniobras_pendientes = maniobras.n;
+    }
+
+    if (ver('administracion')) {
+        const [comprasPend, porPagar, nomina, balanza] = await Promise.all([
+            uno(pool, `SELECT COUNT(*)::int AS n FROM ordenes_compra WHERE estado IN ('borrador','enviada')`),
+            uno(pool, `SELECT COALESCE(SUM(total),0) AS total FROM ordenes_compra WHERE estado = 'recibida' AND NOT pagada`),
+            uno(pool, `SELECT p.fecha, p.referencia FROM polizas p WHERE p.referencia LIKE 'NOM-%' ORDER BY p.fecha DESC LIMIT 1`),
+            uno(pool,
+                `SELECT COALESCE(SUM(m.cargo),0) AS cargos, COALESCE(SUM(m.abono),0) AS abonos FROM poliza_movimientos m`),
+        ]);
+        datos.compras_pendientes = comprasPend.n;
+        datos.por_pagar_proveedores = porPagar.total;
+        datos.ultima_nomina = nomina;
+        datos.balanza_cuadra = Math.abs(balanza.cargos - balanza.abonos) < 0.01;
+    }
+
+    res.json(datos);
 }));
 
 module.exports = router;
