@@ -169,6 +169,23 @@ async function main() {
         await N.pagarOrdenCompra(c, oc.id, { uid, cuentaBancariaId: bbva.id });
         await N.generarOCsPorMinimos(c, { uid });
 
+        // Dos OC recibidas y sin pagar, para que Cuentas por pagar tenga saldo en
+        // cubos de antigüedad distintos (vencimiento = recepción + proveedores.dias_credito).
+        const porPagar = [
+            // Refacciones del Norte: 30 días de crédito, recibida hace 10 → aún por vencer.
+            { proveedor: 'Refacciones Industriales del Norte', recibidaHace: 10, items: [['REF-FIL-AC01', 20], ['REF-FIL-AI02', 15]] },
+            // Baterías: 15 días de crédito, recibida hace 50 → vencida (cubo 31-60 días).
+            { proveedor: 'Baterías y Energía Tracción', recibidaHace: 50, items: [['REF-CAR-009', 2]] },
+        ];
+        for (const p of porPagar) {
+            const items = [];
+            for (const [sku, cantidad] of p.items) items.push({ productoId: await prod(sku), cantidad });
+            const ocp = await N.crearOrdenCompra(c, { proveedorId: await prov(p.proveedor), items, uid });
+            await N.cambiarEstadoOC(c, ocp.id, 'enviada', { uid });
+            await N.cambiarEstadoOC(c, ocp.id, 'recibida', { uid });
+            await c.query('UPDATE ordenes_compra SET fecha_recepcion = $1 WHERE id = $2', [dias(-p.recibidaHace), ocp.id]);
+        }
+
         // --- RRHH: nómina del mes pasado ------------------------------------
         const d = new Date();
         d.setDate(1);
