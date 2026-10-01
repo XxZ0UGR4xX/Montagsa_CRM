@@ -22,13 +22,16 @@ window.iniciar = async (cont) => {
                 <div class="panel-cab"><h2>Nómina</h2></div>
                 <div class="panel-cuerpo">
                     <p class="tenue" style="margin-bottom:12px">Registra la póliza de egreso por los sueldos del mes (cargo a Sueldos, abono a Bancos).</p>
-                    <div class="filtros"><input type="month" id="periodo" aria-label="Periodo"><button class="btn btn-primario" type="button" id="btn-nomina">Registrar nómina</button></div>
+                    <div class="filtros"><input type="month" id="periodo" aria-label="Periodo"><select id="cuenta" aria-label="Cuenta bancaria"></select><button class="btn btn-primario" type="button" id="btn-nomina">Registrar nómina</button></div>
                 </div>
                 <div id="nominas"></div>
             </div>
         </div>`;
     const d = new Date();
     document.getElementById('periodo').value = d.toISOString().slice(0, 7);
+    const cat = await catalogos();
+    document.getElementById('cuenta').innerHTML = `<option value="">Bancos (general)</option>${(cat.cuentas_bancarias || [])
+        .map((b) => `<option value="${b.id}">${esc(b.banco)} ${esc(b.numero_enmascarado)}</option>`).join('')}`;
     document.getElementById('btn-nuevo').onclick = () => editar(null);
     document.getElementById('btn-nomina').onclick = nomina;
     document.getElementById('tabla').addEventListener('click', (e) => {
@@ -79,9 +82,10 @@ function editar(emp) {
 async function nomina() {
     const periodo = document.getElementById('periodo').value;
     if (!periodo) return aviso('Elige el periodo', 'error');
+    const cuenta_bancaria_id = document.getElementById('cuenta').value || undefined;
     if (!(await confirmar(`¿Registrar la nómina de ${periodo}?`, 'Registrar'))) return;
     try {
-        const r = await api('/nomina', { method: 'POST', body: { periodo } });
+        const r = await api('/nomina', { method: 'POST', body: { periodo, cuenta_bancaria_id } });
         aviso(`Nómina registrada: ${dinero(r.total)} (${r.empleados} empleados)`, 'ok');
         await cargar();
     } catch (e) { avisoError(e); }

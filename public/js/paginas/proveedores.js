@@ -6,6 +6,7 @@ window.iniciar = (cont) => crudPagina(cont, {
         { t: 'Proveedor', k: 'nombre', r: (p) => `<strong>${esc(p.nombre)}</strong><div class="sub">${esc(p.rfc || '')}</div>` },
         { t: 'Contacto', k: 'contacto', r: (p) => `${esc(p.contacto || '—')}<div class="sub">${esc(p.telefono || '')} ${esc(p.email || '')}</div>` },
         { t: 'Entrega', k: 'tiempo_entrega_dias', num: true, r: (p) => `${p.tiempo_entrega_dias} días` },
+        { t: 'Crédito', k: 'dias_credito', num: true, r: (p) => `${p.dias_credito} días` },
         { t: 'Refacciones', k: 'productos', num: true },
         { t: 'Por pagar', k: 'por_pagar', num: true, r: (p) => (p.por_pagar > 0 ? dinero(p.por_pagar) : '—') },
         { t: 'Estado', k: 'activo', r: (p) => (p.activo ? tag('activo') : tag('inactivo')) },
@@ -17,6 +18,7 @@ window.iniciar = (cont) => crudPagina(cont, {
         { k: 'telefono', etiqueta: 'Teléfono' },
         { k: 'email', etiqueta: 'Correo', tipo: 'email' },
         { k: 'tiempo_entrega_dias', etiqueta: 'Tiempo de entrega (días)', tipo: 'number', defecto: 7 },
+        { k: 'dias_credito', etiqueta: 'Días de crédito para pagarle', tipo: 'number', defecto: 30, ayuda: 'Se usa para la antigüedad de Cuentas por pagar' },
         { k: 'activo', etiqueta: 'Activo', tipo: 'checkbox', defecto: true },
     ],
 });

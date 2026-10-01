@@ -1,9 +1,10 @@
 // Configuración · Usuarios y roles (solo administrador).
-const ROLES_OPC = [['admin', 'Administrador (todo)'], ['almacen', 'Almacén'], ['comercial', 'Comercial'], ['administracion', 'Administración']];
+const ROLES_OPC = [['admin', 'Administrador (todo)'], ['almacen', 'Almacén'], ['comercial', 'Comercial'], ['produccion', 'Producción'], ['administracion', 'Administración'], ['contabilidad', 'Contabilidad']];
 
 window.iniciar = (cont) => crudPagina(cont, {
     titulo: 'Usuarios y roles',
-    subtitulo: 'Almacén ve flota e inventario; Comercial ve rentas, servicios y facturación; Administración ve compras, cobranza, créditos, RRHH y contabilidad.',
+    subtitulo: 'Almacén ve flota e inventario; Comercial ve rentas, servicios y facturación; Producción ve órdenes de trabajo; '
+        + 'Administración ve compras, cobranza, créditos, RRHH y contabilidad (solo lectura); Contabilidad ve contabilidad, bancos, cuentas por pagar y cierre.',
     ruta: '/usuarios', nombre: 'usuario',
     columnas: [
         { t: 'Nombre', k: 'nombre', r: (u) => `<strong>${esc(u.nombre)}</strong>` },

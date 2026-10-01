@@ -25,11 +25,15 @@ async function main() {
     const prov = async (nombre) => (await uno(pool, 'SELECT id FROM proveedores WHERE nombre = $1', [nombre])).id;
 
     await tx(async (c) => {
+        // --- Bancos: dos cuentas bancarias (subcuentas de "Bancos") ---------
+        const bbva = await N.crearCuentaBancaria(c, { banco: 'BBVA', numeroEnmascarado: '**** 4821', saldoInicial: 500000, uid });
+        const santander = await N.crearCuentaBancaria(c, { banco: 'Santander', numeroEnmascarado: '**** 1190', saldoInicial: 350000, uid });
+
         // --- Rentas ---------------------------------------------------------
         // Logística del Bajío: renta mensual facturada y pagada, luego renovada
         const r1 = await N.crearRenta(c, { clienteId: await cli('LBA150312AB1'), equipoId: await eq('MG-001'), periodo: 'mensual', fechaInicio: dias(-40), uid });
         const f1 = await N.facturarRenta(c, r1.id, { uid, fecha: dias(-40) });
-        await N.registrarPago(c, f1.id, { monto: f1.total, metodo: 'transferencia', referencia: 'SPEI 88120', fecha: dias(-12), uid });
+        await N.registrarPago(c, f1.id, { monto: f1.total, metodo: 'transferencia', referencia: 'SPEI 88120', fecha: dias(-12), uid, cuentaBancariaId: bbva.id });
         await N.finalizarRenta(c, r1.id, { horometroRegreso: 8295.0, fecha: dias(-10), uid });
         const r1b = await N.crearRenta(c, { clienteId: await cli('LBA150312AB1'), equipoId: await eq('MG-001'), periodo: 'mensual', fechaInicio: dias(-10), uid });
         await N.facturarRenta(c, r1b.id, { uid, fecha: dias(-10) });
@@ -162,14 +166,19 @@ async function main() {
             { productoId: await prod('CON-ACE-013'), cantidad: 12 }, { productoId: await prod('CON-GAS-015'), cantidad: 8 }], uid });
         await N.cambiarEstadoOC(c, oc.id, 'enviada', { uid });
         await N.cambiarEstadoOC(c, oc.id, 'recibida', { uid });
-        await N.pagarOrdenCompra(c, oc.id, { uid });
+        await N.pagarOrdenCompra(c, oc.id, { uid, cuentaBancariaId: bbva.id });
         await N.generarOCsPorMinimos(c, { uid });
 
-        // --- RRHH: nómina del mes pasado -----------------------------------
+        // --- RRHH: nómina del mes pasado ------------------------------------
         const d = new Date();
         d.setDate(1);
         d.setMonth(d.getMonth() - 1);
-        await N.generarNomina(c, { periodo: d.toISOString().slice(0, 7), uid });
+        const periodoPasado = d.toISOString().slice(0, 7);
+        await N.generarNomina(c, { periodo: periodoPasado, uid, cuentaBancariaId: santander.id });
+
+        // --- Contabilidad: depreciación del mes pasado y cierre de ese mes --
+        await N.calcularDepreciacionMes(c, { periodo: periodoPasado, uid });
+        await N.cerrarPeriodo(c, { anio: d.getFullYear(), mes: d.getMonth() + 1, uid });
 
         // --- Gasto manual --------------------------------------------------
         await N.crearPoliza(c, { tipo: 'egreso', concepto: 'Pago de luz y agua de la nave', referencia: 'CFE-0925', automatica: false, uid,

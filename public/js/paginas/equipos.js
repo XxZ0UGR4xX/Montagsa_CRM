@@ -16,7 +16,9 @@ const CAMPOS_EQ = [
     { k: 'tarifa_semanal', etiqueta: 'Tarifa semanal', tipo: 'number', paso: '0.01' },
     { k: 'tarifa_mensual', etiqueta: 'Tarifa mensual', tipo: 'number', paso: '0.01' },
     { k: 'precio_venta', etiqueta: 'Precio de venta', tipo: 'number', paso: '0.01' },
-    { k: 'costo_adquisicion', etiqueta: 'Costo de adquisición', tipo: 'number', paso: '0.01', ancho: true },
+    { k: 'costo_adquisicion', etiqueta: 'Costo de adquisición', tipo: 'number', paso: '0.01' },
+    { k: 'vida_util_meses', etiqueta: 'Vida útil (meses)', tipo: 'number', defecto: 60 },
+    { k: 'valor_residual', etiqueta: 'Valor residual', tipo: 'number', paso: '0.01' },
     { k: 'notas', etiqueta: 'Notas', tipo: 'textarea', ancho: true },
 ];
 const PESTANAS = [['', 'Todos'], ['disponible', 'Disponibles'], ['renta', 'En renta'], ['venta', 'En venta'], ['reparacion', 'Reparación'], ['vendido', 'Vendidos']];
@@ -85,6 +87,7 @@ async function ver(id) {
                 <dt>Serie</dt><dd>${esc(e.serie || '—')}</dd>
                 <dt>Horómetro</dt><dd>${numero(e.horometro, 1)} h</dd>
                 <dt>Tarifas</dt><dd>${dinero(e.tarifa_diaria)} día · ${dinero(e.tarifa_semanal)} semana · ${dinero(e.tarifa_mensual)} mes</dd>
+                <dt>Depreciación acumulada</dt><dd>${dinero(e.depreciacion_acumulada)} de ${dinero(e.costo_adquisicion - e.valor_residual)} depreciable (${e.vida_util_meses} meses)</dd>
             </dl>
             <h4 style="margin:8px 0">Traspasos</h4>
             ${tabla({ vacio: 'Sin traspasos', filas: e.traspasos, columnas: [

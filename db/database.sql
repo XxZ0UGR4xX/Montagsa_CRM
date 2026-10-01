@@ -14,7 +14,8 @@
 SET client_min_messages TO WARNING;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-DROP TABLE IF EXISTS poliza_movimientos, polizas, cuentas_contables,
+DROP TABLE IF EXISTS periodos_contables, poliza_movimientos, polizas,
+    cuentas_bancarias, cuentas_contables,
     pagos, factura_conceptos, facturas,
     requisicion_items, requisiciones,
     equipo_preventivo, secuencia_preventivo, config_preventivo,
@@ -43,9 +44,9 @@ CREATE TABLE usuarios (
     nombre          VARCHAR(120) NOT NULL,
     email           VARCHAR(150) NOT NULL UNIQUE,
     password_hash   TEXT NOT NULL,
-    -- admin: todo · almacen · comercial · produccion · administracion
+    -- admin: todo · almacen · comercial · produccion · administracion · contabilidad
     rol             VARCHAR(20) NOT NULL DEFAULT 'comercial'
-                    CHECK (rol IN ('admin','almacen','comercial','produccion','administracion')),
+                    CHECK (rol IN ('admin','almacen','comercial','produccion','administracion','contabilidad')),
     activo          BOOLEAN NOT NULL DEFAULT TRUE,
     creado          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     actualizado     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -118,6 +119,7 @@ CREATE TABLE proveedores (
     telefono            VARCHAR(30),
     email               VARCHAR(150),
     tiempo_entrega_dias INTEGER NOT NULL DEFAULT 7 CHECK (tiempo_entrega_dias > 0),
+    dias_credito        INTEGER NOT NULL DEFAULT 30 CHECK (dias_credito >= 0),
     activo              BOOLEAN NOT NULL DEFAULT TRUE,
     creado              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -148,6 +150,10 @@ CREATE TABLE equipos (
     tarifa_semanal      NUMERIC(10,2) NOT NULL DEFAULT 0,
     tarifa_mensual      NUMERIC(10,2) NOT NULL DEFAULT 0,
     precio_venta        NUMERIC(12,2) NOT NULL DEFAULT 0,
+    -- Depreciación en línea recta (Contabilidad)
+    vida_util_meses         INTEGER NOT NULL DEFAULT 60 CHECK (vida_util_meses > 0),
+    valor_residual          NUMERIC(12,2) NOT NULL DEFAULT 0,
+    depreciacion_acumulada  NUMERIC(12,2) NOT NULL DEFAULT 0,
     notas               TEXT,
     creado              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     actualizado         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -215,6 +221,8 @@ CREATE TABLE ordenes_compra (
                       CHECK (estado IN ('borrador','enviada','recibida','cancelada')),
     fecha             DATE NOT NULL DEFAULT CURRENT_DATE,
     fecha_recepcion   DATE,
+    subtotal          NUMERIC(12,2) NOT NULL DEFAULT 0,
+    iva               NUMERIC(12,2) NOT NULL DEFAULT 0,
     total             NUMERIC(12,2) NOT NULL DEFAULT 0,
     pagada            BOOLEAN NOT NULL DEFAULT FALSE,
     fecha_pago        DATE,
@@ -433,11 +441,33 @@ CREATE TABLE pagos (
 -- =====================================================================
 --  ADMINISTRACIÓN · CONTABILIDAD (partida doble)
 -- =====================================================================
+-- Catálogo jerárquico: cuentas de mayor (nivel 1, padre_id NULL) y
+-- subcuentas (p. ej. una por banco, colgada de "Bancos" 1102).
+-- naturaleza decide el signo de saldo "normal" (no siempre coincide con el
+-- tipo: la depreciación acumulada es tipo 'activo' pero naturaleza 'acreedora'
+-- porque es una cuenta complementaria/contra-activo).
 CREATE TABLE cuentas_contables (
-    id          SERIAL PRIMARY KEY,
-    codigo      VARCHAR(10) NOT NULL UNIQUE,
-    nombre      VARCHAR(120) NOT NULL,
-    tipo        VARCHAR(10) NOT NULL CHECK (tipo IN ('activo','pasivo','capital','ingreso','costo','gasto'))
+    id                    SERIAL PRIMARY KEY,
+    codigo                VARCHAR(10) NOT NULL UNIQUE,
+    nombre                VARCHAR(120) NOT NULL,
+    tipo                  VARCHAR(10) NOT NULL CHECK (tipo IN ('activo','pasivo','capital','ingreso','costo','gasto')),
+    naturaleza            VARCHAR(10) NOT NULL CHECK (naturaleza IN ('deudora','acreedora')),
+    padre_id              INTEGER REFERENCES cuentas_contables(id),
+    nivel                 INTEGER NOT NULL DEFAULT 1 CHECK (nivel > 0),
+    codigo_agrupador_sat  VARCHAR(10),
+    activa                BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE INDEX idx_cuentas_padre ON cuentas_contables(padre_id);
+
+-- Cuentas bancarias de la empresa: cada una es una subcuenta de "Bancos" (1102).
+CREATE TABLE cuentas_bancarias (
+    id                  SERIAL PRIMARY KEY,
+    banco               VARCHAR(80) NOT NULL,
+    numero_enmascarado  VARCHAR(30) NOT NULL,
+    cuenta_contable_id  INTEGER NOT NULL REFERENCES cuentas_contables(id),
+    saldo_inicial       NUMERIC(12,2) NOT NULL DEFAULT 0,
+    activa              BOOLEAN NOT NULL DEFAULT TRUE,
+    creado              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE polizas (
@@ -448,6 +478,7 @@ CREATE TABLE polizas (
     concepto    TEXT NOT NULL,
     referencia  VARCHAR(40),
     automatica  BOOLEAN NOT NULL DEFAULT TRUE,
+    cancelada   BOOLEAN NOT NULL DEFAULT FALSE,
     usuario_id  INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
     creado      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -457,9 +488,22 @@ CREATE TABLE poliza_movimientos (
     poliza_id   INTEGER NOT NULL REFERENCES polizas(id) ON DELETE CASCADE,
     cuenta_id   INTEGER NOT NULL REFERENCES cuentas_contables(id),
     cargo       NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (cargo >= 0),
-    abono       NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (abono >= 0)
+    abono       NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (abono >= 0),
+    conciliado  BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE INDEX idx_polmov_cuenta ON poliza_movimientos(cuenta_id);
+
+-- Cierre de periodo: ningún mes cerrado admite pólizas nuevas (lib/negocio.js
+-- lo valida en crearPoliza antes de insertar). Solo admin puede reabrir.
+CREATE TABLE periodos_contables (
+    id            SERIAL PRIMARY KEY,
+    anio          INTEGER NOT NULL CHECK (anio >= 2000),
+    mes           INTEGER NOT NULL CHECK (mes BETWEEN 1 AND 12),
+    cerrado       BOOLEAN NOT NULL DEFAULT FALSE,
+    cerrado_por   INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    fecha_cierre  TIMESTAMP,
+    UNIQUE (anio, mes)
+);
 
 -- =====================================================================
 --  DATOS MAESTROS
@@ -471,28 +515,37 @@ INSERT INTO usuarios (nombre, email, password_hash, rol) VALUES
 ('Jorge Almacén',         'almacen@montagsa.mx',   crypt('Almacen#MG2026', gen_salt('bf', 10)), 'almacen'),
 ('Karla Comercial',       'comercial@montagsa.mx', crypt('Comercial#MG2026', gen_salt('bf', 10)), 'comercial'),
 ('Beto Producción',       'produccion@montagsa.mx', crypt('Produccion#MG2026', gen_salt('bf', 10)), 'produccion'),
-('Rosa Administración',   'admon@montagsa.mx',     crypt('Admon#MG2026',  gen_salt('bf', 10)), 'administracion');
+('Rosa Administración',   'admon@montagsa.mx',     crypt('Admon#MG2026',  gen_salt('bf', 10)), 'administracion'),
+('Contabilidad Montagsa', 'contabilidad@montagsa.mx', crypt('Contabilidad#MG2026', gen_salt('bf', 10)), 'contabilidad');
 
--- Catálogo de cuentas (simplificado)
-INSERT INTO cuentas_contables (codigo, nombre, tipo) VALUES
-('1101', 'Caja',                         'activo'),
-('1102', 'Bancos',                       'activo'),
-('1105', 'Clientes',                     'activo'),
-('1150', 'Inventario de refacciones',    'activo'),
-('1201', 'Equipo de renta (flota)',      'activo'),
-('2101', 'Proveedores',                  'pasivo'),
-('2105', 'IVA trasladado',               'pasivo'),
-('3101', 'Capital social',               'capital'),
-('4101', 'Ingresos por rentas',          'ingreso'),
-('4102', 'Ingresos por servicios',       'ingreso'),
-('4103', 'Ingresos por venta de equipo', 'ingreso'),
-('4104', 'Otros ingresos',               'ingreso'),
-('4105', 'Ingresos por maniobras',       'ingreso'),
-('4106', 'Ingresos por venta de refacciones', 'ingreso'),
-('5101', 'Costo de refacciones usadas',  'costo'),
-('5102', 'Costo de equipo vendido',      'costo'),
-('6101', 'Sueldos y salarios',           'gasto'),
-('6102', 'Gastos generales',             'gasto');
+-- Catálogo de cuentas (jerárquico: cuentas de mayor; las subcuentas de banco
+-- se crean cuando se registra una cuenta bancaria, ver lib/negocio.js#crearCuentaBancaria)
+INSERT INTO cuentas_contables (codigo, nombre, tipo, naturaleza, nivel) VALUES
+('1101', 'Caja',                              'activo',   'deudora',   1),
+('1102', 'Bancos',                            'activo',   'deudora',   1),
+('1105', 'Clientes',                          'activo',   'deudora',   1),
+('1150', 'Inventario de refacciones',         'activo',   'deudora',   1),
+('1151', 'IVA acreditable',                   'activo',   'deudora',   1),
+('1152', 'IVA por acreditar',                 'activo',   'deudora',   1),
+('1201', 'Equipo de renta (flota)',           'activo',   'deudora',   1),
+('1202', 'Depreciación acumulada de flota',   'activo',   'acreedora', 1),
+('2101', 'Proveedores',                       'pasivo',   'acreedora', 1),
+('2102', 'Acreedores diversos',               'pasivo',   'acreedora', 1),
+('2105', 'IVA trasladado cobrado',            'pasivo',   'acreedora', 1),
+('2106', 'IVA trasladado no cobrado',         'pasivo',   'acreedora', 1),
+('2110', 'ISR y retenciones por pagar',       'pasivo',   'acreedora', 1),
+('3101', 'Capital social',                    'capital',  'acreedora', 1),
+('4101', 'Ingresos por rentas',               'ingreso',  'acreedora', 1),
+('4102', 'Ingresos por servicios',            'ingreso',  'acreedora', 1),
+('4103', 'Ingresos por venta de equipo',      'ingreso',  'acreedora', 1),
+('4104', 'Otros ingresos',                    'ingreso',  'acreedora', 1),
+('4105', 'Ingresos por maniobras',            'ingreso',  'acreedora', 1),
+('4106', 'Ingresos por venta de refacciones', 'ingreso',  'acreedora', 1),
+('5101', 'Costo de refacciones usadas',       'costo',    'deudora',   1),
+('5102', 'Costo de equipo vendido',           'costo',    'deudora',   1),
+('6101', 'Sueldos y salarios',                'gasto',    'deudora',   1),
+('6102', 'Gastos generales',                  'gasto',    'deudora',   1),
+('6103', 'Gasto por depreciación',            'gasto',    'deudora',   1);
 
 -- Clientes (empresas ficticias)
 INSERT INTO clientes (razon_social, rfc, contacto, telefono, email, direccion, etapa, limite_credito, dias_credito, credito_estado) VALUES
@@ -504,11 +557,11 @@ INSERT INTO clientes (razon_social, rfc, contacto, telefono, email, direccion, e
 ('Constructora Altavista',              'CAL160918KL6', 'Arq. Sofía Rangel',   '449 940 8899', 'srangel@altavista.mx',    'Av. Universidad 1001, Ags.',             'inactivo',   50000, 15, 'activo');
 
 -- Proveedores
-INSERT INTO proveedores (nombre, rfc, contacto, telefono, email, tiempo_entrega_dias) VALUES
-('Refacciones Industriales del Norte', 'RIN100101AA1', 'Carlos Pérez',  '81 8333 1122', 'ventas@rinorte.mx',      5),
-('Baterías y Energía Tracción',        'BET120202BB2', 'Mónica Salas',  '33 3615 7788', 'contacto@betraccion.mx', 10),
-('Llantas Sólidas de México',          'LSM130303CC3', 'Raúl Estrada',  '55 5580 4433', 'raul@llantassolidas.mx',  7),
-('Lubricantes del Bajío',              'LUB140404DD4', 'Elena Cruz',    '449 912 6655', 'pedidos@lubbajio.mx',     3);
+INSERT INTO proveedores (nombre, rfc, contacto, telefono, email, tiempo_entrega_dias, dias_credito) VALUES
+('Refacciones Industriales del Norte', 'RIN100101AA1', 'Carlos Pérez',  '81 8333 1122', 'ventas@rinorte.mx',      5, 30),
+('Baterías y Energía Tracción',        'BET120202BB2', 'Mónica Salas',  '33 3615 7788', 'contacto@betraccion.mx', 10, 15),
+('Llantas Sólidas de México',          'LSM130303CC3', 'Raúl Estrada',  '55 5580 4433', 'raul@llantassolidas.mx',  7, 30),
+('Lubricantes del Bajío',              'LUB140404DD4', 'Elena Cruz',    '449 912 6655', 'pedidos@lubbajio.mx',     3, 0);
 
 -- Equipos (flota)
 INSERT INTO equipos (numero_economico, tipo, marca, modelo, serie, anio, capacidad_kg, combustible, horometro, estado, ubicacion, costo_adquisicion, tarifa_diaria, tarifa_semanal, tarifa_mensual, precio_venta) VALUES

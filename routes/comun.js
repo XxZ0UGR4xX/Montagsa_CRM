@@ -118,6 +118,10 @@ router.get('/catalogos', requireAuth, ruta(async (req, res) => {
         out.tecnicos = await todos(pool, `SELECT id, nombre, puesto FROM empleados WHERE estado = 'activo' AND area = 'taller' ORDER BY nombre`);
     }
 
+    if (tiene('cobranza', 'compras', 'cuentas_por_pagar', 'rrhh', 'bancos', 'contabilidad')) {
+        out.cuentas_bancarias = await todos(pool, `SELECT id, banco, numero_enmascarado FROM cuentas_bancarias WHERE activa ORDER BY banco`);
+    }
+
     res.json(out);
 }));
 

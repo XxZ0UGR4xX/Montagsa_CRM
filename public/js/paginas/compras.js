@@ -72,8 +72,18 @@ async function cambiarEstado(oc, estado) {
 }
 
 async function pagar(oc) {
-    if (!(await confirmar(`Registrar el pago de ${oc.folio} a ${oc.proveedor} por ${dinero(oc.total)} desde Bancos.`, 'Pagar'))) return;
-    try { await api(`/compras/${oc.id}/pagar`, { method: 'POST' }); aviso('Pago a proveedor registrado', 'ok'); await cargar(); } catch (e) { avisoError(e); }
+    const cat = await catalogos();
+    const cuentas = cat.cuentas_bancarias || [];
+    const campos = cuentas.length ? [{ k: 'cuenta_bancaria_id', etiqueta: 'Cuenta bancaria', tipo: 'select', vacio: 'Bancos (general)', opciones: opciones(cuentas, 'id', (c) => `${c.banco} ${c.numero_enmascarado}`) }] : [];
+    modal({
+        titulo: `Pagar ${oc.folio}`,
+        cuerpo: `<p style="margin-bottom:14px">${esc(oc.proveedor)} · total <strong>${dinero(oc.total)}</strong></p>${formulario(campos)}`,
+        acciones: [{ texto: 'Cancelar' }, { texto: 'Pagar', clase: 'btn-primario', onClick: async (m) => {
+            await api(`/compras/${oc.id}/pagar`, { method: 'POST', body: leerFormulario(m, campos) });
+            aviso('Pago a proveedor registrado', 'ok');
+            await cargar();
+        } }],
+    });
 }
 
 async function nueva() {

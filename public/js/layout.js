@@ -30,6 +30,9 @@ const MENU = [
         ['creditos', 'Créditos', '/administracion/creditos.html'],
         ['rrhh', 'Recursos humanos', '/administracion/rrhh.html'],
         ['contabilidad', 'Contabilidad', '/administracion/contabilidad.html'],
+        ['bancos', 'Bancos', '/administracion/bancos.html'],
+        ['cuentas_por_pagar', 'Cuentas por pagar', '/administracion/cuentas-por-pagar.html'],
+        ['cierre', 'Cierre de periodo', '/administracion/cierre.html'],
     ] },
     { grupo: 'CRM', items: [
         ['clientes', 'Clientes', '/crm/clientes.html'],
@@ -38,7 +41,7 @@ const MENU = [
     { grupo: 'Configuración', items: [['usuarios', 'Usuarios y roles', '/config/usuarios.html']] },
 ];
 
-const ROLES = { admin: 'Administrador', almacen: 'Almacén', comercial: 'Comercial', produccion: 'Producción', administracion: 'Administración' };
+const ROLES = { admin: 'Administrador', almacen: 'Almacén', comercial: 'Comercial', produccion: 'Producción', administracion: 'Administración', contabilidad: 'Contabilidad' };
 
 function encabezado(titulo, subtitulo = '', acciones = '') {
     return `<div class="encabezado">

@@ -75,7 +75,8 @@ router.post('/interacciones', puede('interacciones'), ruta(async (req, res) => {
 // =====================================================================
 // El estado NO se edita aquí: solo cambia por traspasos, rentas, servicios o venta.
 const CAMPOS_EQUIPO = ['numero_economico', 'tipo', 'marca', 'modelo', 'serie', 'anio', 'capacidad_kg', 'combustible',
-    'horometro', 'ubicacion', 'costo_adquisicion', 'tarifa_diaria', 'tarifa_semanal', 'tarifa_mensual', 'precio_venta', 'notas'];
+    'horometro', 'ubicacion', 'costo_adquisicion', 'tarifa_diaria', 'tarifa_semanal', 'tarifa_mensual', 'precio_venta',
+    'vida_util_meses', 'valor_residual', 'notas'];
 
 router.get('/equipos', puede('equipos'), ruta(async (req, res) => {
     const params = [];
