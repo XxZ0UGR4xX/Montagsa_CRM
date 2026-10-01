@@ -82,15 +82,37 @@ router.get('/cobranza', puede('cobranza'), ruta(async (req, res) => {
 
 router.get('/pagos', puede('cobranza'), ruta(async (req, res) => {
     res.json(await todos(pool,
-        `SELECT p.*, f.folio, c.razon_social, u.nombre AS usuario FROM pagos p
+        `SELECT p.*, f.folio, c.razon_social, u.nombre AS usuario, ua.nombre AS cancelado_por_nombre FROM pagos p
          JOIN facturas f ON f.id = p.factura_id JOIN clientes c ON c.id = f.cliente_id
-         LEFT JOIN usuarios u ON u.id = p.usuario_id ORDER BY p.fecha DESC, p.id DESC LIMIT 200`));
+         LEFT JOIN usuarios u ON u.id = p.usuario_id LEFT JOIN usuarios ua ON ua.id = p.cancelado_por
+         ORDER BY p.fecha DESC, p.id DESC LIMIT 200`));
 }));
 
 router.post('/pagos', puede('cobranza'), ruta(async (req, res) => {
     const b = req.body || {};
-    res.status(201).json(await tx((c) => N.registrarPago(c, b.factura_id, {
-        monto: b.monto, metodo: b.metodo, referencia: b.referencia, fecha: b.fecha, uid: req.usuario.id })));
+    res.status(201).json(await tx(async (c) => {
+        const pago = await N.registrarPago(c, b.factura_id, {
+            monto: b.monto, metodo: b.metodo, referencia: b.referencia, fecha: b.fecha,
+            uid: req.usuario.id, cuentaBancariaId: b.cuenta_bancaria_id });
+        await N.auditar(c, { uid: req.usuario.id, ip: req.ip, accion: 'crear', entidad: 'pago', entidadId: pago.id, despues: pago });
+        return pago;
+    }));
+}));
+
+// Anular un pago mal capturado: solo admin y administración, con motivo.
+router.post('/pagos/:id/anular', puede('cobranza'), ruta(async (req, res) => {
+    if (!['admin', 'administracion'].includes(req.usuario.rol)) {
+        throw new ErrorNegocio(403, 'Solo Administración puede anular un pago');
+    }
+    res.json(await tx(async (c) => {
+        const antes = await uno(c, 'SELECT * FROM pagos WHERE id = $1', [req.params.id]);
+        const pago = await N.anularPago(c, req.params.id, { motivo: req.body && req.body.motivo, uid: req.usuario.id });
+        await N.auditar(c, {
+            uid: req.usuario.id, ip: req.ip, accion: 'anular', entidad: 'pago', entidadId: Number(req.params.id),
+            antes, despues: pago,
+        });
+        return pago;
+    }));
 }));
 
 // =====================================================================
@@ -113,7 +135,19 @@ router.get('/creditos', puede('creditos'), ruta(async (req, res) => {
 router.put('/creditos/:id', puede('creditos'), ruta(async (req, res) => {
     const b = req.body || {};
     if (b.limite_credito != null && Number(b.limite_credito) < 0) throw new ErrorNegocio(400, 'Límite inválido');
-    res.json(await actualizar(pool, 'clientes', req.params.id, ['limite_credito', 'dias_credito', 'credito_estado'], b));
+    const CAMPOS_CREDITO = ['limite_credito', 'dias_credito', 'credito_estado'];
+    res.json(await tx(async (c) => {
+        const previo = await uno(c, 'SELECT id, razon_social, limite_credito, dias_credito, credito_estado FROM clientes WHERE id = $1', [req.params.id]);
+        if (!previo) throw new ErrorNegocio(404, 'Cliente no encontrado');
+        const cliente = await actualizar(c, 'clientes', req.params.id, CAMPOS_CREDITO, b);
+        await N.auditar(c, {
+            uid: req.usuario.id, ip: req.ip, accion: 'editar', entidad: 'credito', entidadId: Number(req.params.id),
+            antes: previo,
+            despues: { id: cliente.id, razon_social: cliente.razon_social, limite_credito: cliente.limite_credito,
+                dias_credito: cliente.dias_credito, credito_estado: cliente.credito_estado },
+        });
+        return cliente;
+    }));
 }));
 
 // =====================================================================
@@ -208,17 +242,32 @@ router.get('/contabilidad/polizas', puede('contabilidad'), ruta(async (req, res)
 router.post('/contabilidad/polizas', puede('contabilidad'), ruta(async (req, res) => {
     const b = req.body || {};
     if (!b.concepto) throw new ErrorNegocio(400, 'El concepto es obligatorio');
-    res.status(201).json(await tx((c) => N.crearPoliza(c, {
-        fecha: b.fecha, tipo: b.tipo || 'diario', concepto: b.concepto, referencia: b.referencia || 'MANUAL',
-        automatica: false, uid: req.usuario.id,
-        movimientos: (b.movimientos || []).map((m) => ({ codigo: m.codigo, cargo: Number(m.cargo) || 0, abono: Number(m.abono) || 0 })),
-    })));
+    res.status(201).json(await tx(async (c) => {
+        const movimientos = (b.movimientos || []).map((m) => ({ codigo: m.codigo, cargo: Number(m.cargo) || 0, abono: Number(m.abono) || 0 }));
+        const p = await N.crearPoliza(c, {
+            fecha: b.fecha, tipo: b.tipo || 'diario', concepto: b.concepto, referencia: b.referencia || 'MANUAL',
+            automatica: false, uid: req.usuario.id, movimientos,
+        });
+        await N.auditar(c, {
+            uid: req.usuario.id, ip: req.ip, accion: 'crear', entidad: 'poliza', entidadId: p.id,
+            despues: { ...p, movimientos },
+        });
+        return p;
+    }));
 }));
 
 // Cancelación de póliza manual: nunca se borra, se genera una póliza de reversa.
 router.post('/contabilidad/polizas/:id/cancelar', puede('contabilidad'), ruta(async (req, res) => {
     soloContabilidad(req);
-    res.json(await tx((c) => N.cancelarPoliza(c, req.params.id, { motivo: req.body && req.body.motivo, uid: req.usuario.id })));
+    res.json(await tx(async (c) => {
+        const antes = await uno(c, 'SELECT * FROM polizas WHERE id = $1', [req.params.id]);
+        const reversa = await N.cancelarPoliza(c, req.params.id, { motivo: req.body && req.body.motivo, uid: req.usuario.id });
+        await N.auditar(c, {
+            uid: req.usuario.id, ip: req.ip, accion: 'cancelar', entidad: 'poliza', entidadId: Number(req.params.id),
+            antes, despues: { reversa: reversa.folio, motivo: (req.body && req.body.motivo) || null },
+        });
+        return reversa;
+    }));
 }));
 
 // Balanza de comprobación

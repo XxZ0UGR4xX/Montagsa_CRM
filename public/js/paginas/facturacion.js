@@ -30,6 +30,8 @@ window.iniciar = async (cont) => {
     });
     await cargarPendientes();
     await cargar();
+    const id = idDeUrl();
+    if (id) await detalle(id);
 };
 
 const TIPO_OT_TXT = { servicio: 'Servicio', maniobra: 'Maniobra', refaccion: 'Refacciones' };
@@ -90,6 +92,8 @@ async function detalle(id) {
     const f = await api(`/facturas/${id}`);
     const cobrable = ['pendiente', 'parcial'].includes(f.estado) && puedeVer('cobranza');
     const cancelable = f.estado !== 'cancelada' && f.pagado === 0 && puedeVer('facturacion');
+    // Anular un pago mal capturado es exclusivo de Administración.
+    const puedeAnular = ['admin', 'administracion'].includes((Sesion.usuario() || {}).rol) && f.pagos.some((p) => !p.cancelado);
     const m = modal({
         titulo: `Factura ${f.folio}`, ancho: 820,
         cuerpo: `<div id="impresion">
@@ -114,16 +118,31 @@ async function detalle(id) {
             ${f.notas ? `<p class="tenue" style="margin-top:10px">${esc(f.notas)}</p>` : ''}
             <h4 style="margin:18px 0 8px">Pagos</h4>
             ${tabla({ vacio: 'Sin pagos registrados', filas: f.pagos, columnas: [
-                { t: 'Fecha', r: (p) => fecha(p.fecha) }, { t: 'Método', k: 'metodo' }, { t: 'Referencia', k: 'referencia' }, { t: 'Monto', num: true, r: (p) => dinero(p.monto) }] })}
+                { t: 'Fecha', r: (p) => fecha(p.fecha) }, { t: 'Método', k: 'metodo' }, { t: 'Referencia', k: 'referencia' },
+                { t: 'Monto', num: true, r: (p) => (p.cancelado ? `<s>${dinero(p.monto)}</s>` : dinero(p.monto)) },
+                { t: 'Estado', r: (p) => (p.cancelado ? `${tag('cancelada', 'Anulado')}<div class="sub">${esc(p.motivo_cancelacion || '')}</div>` : tag('pagada', 'Aplicado')) },
+                ...(puedeAnular ? [{ t: '', clase: 'acciones', r: (p) => (p.cancelado ? '' : `<button class="btn btn-chico btn-peligro" type="button" data-anular="${p.id}">Anular</button>`) }] : []),
+            ] })}
             <p style="margin-top:10px">Saldo: <strong>${dinero(f.total - f.pagado)}</strong></p>
             <p class="tenue" style="margin-top:6px;font-size:13px">Documento interno sin validez fiscal (no timbrado).</p>
-        </div>`,
+        </div>
+        <h4 style="margin:18px 0 8px">Bitácora</h4>
+        <div id="bitacora-factura"></div>`,
         acciones: [
             { texto: 'Cerrar' },
             { texto: 'Imprimir', onClick: () => { imprimir(f.folio, m.el.querySelector('#impresion').innerHTML); return false; } },
             ...(cancelable ? [{ texto: 'Cancelar factura', clase: 'btn-peligro', onClick: () => cancelarFactura(f) }] : []),
-            ...(cobrable ? [{ texto: 'Registrar pago', clase: 'btn-primario', onClick: () => { dialogoPago(f, cargar); } }] : []),
+            ...(cobrable ? [{ texto: 'Registrar pago', clase: 'btn-primario', onClick: () => dialogoPago(f, cargar) }] : []),
         ],
+    });
+    panelBitacora(m.el.querySelector('#bitacora-factura'), 'factura', f.id);
+    m.el.querySelectorAll('[data-anular]').forEach((b) => {
+        b.onclick = async () => {
+            try {
+                const r = await anularPago(f.pagos.find((p) => String(p.id) === b.dataset.anular), cargar);
+                if (r !== false) { m.cerrar(); await detalle(f.id); }
+            } catch (e) { avisoError(e); }
+        };
     });
 }
 

@@ -49,7 +49,8 @@ async function api(ruta, { method = 'GET', body } = {}) {
 /**
  * Ejecuta una operación que puede toparse con el límite de crédito.
  * Si el backend responde 409 pidiendo autorización y el usuario es admin,
- * ofrece reintentar con { forzar: true }.
+ * ofrece reintentar con { forzar: true }. El motivo es obligatorio: queda
+ * en auditoría junto con quién autorizó.
  */
 async function conAutorizacion(fn, body) {
     try {
@@ -57,12 +58,37 @@ async function conAutorizacion(fn, body) {
     } catch (e) {
         const u = Sesion.usuario();
         if (e.status === 409 && /administrador puede autorizarlo/i.test(e.message) && u && u.rol === 'admin') {
-            const ok = await confirmar(`${e.message}\n\n¿Autorizar la operación de todos modos?`, 'Autorizar');
-            if (ok) return fn({ ...body, forzar: true });
+            const motivo = await pedirMotivo(e.message);
+            if (motivo) return fn({ ...body, forzar: true, motivo_autorizacion: motivo });
             return null;
         }
         throw e;
     }
+}
+
+/** Diálogo de motivo obligatorio (autorizaciones de crédito, anulaciones, pérdidas). */
+function pedirMotivo(mensaje, { titulo = 'Autorizar', textoOk = 'Autorizar', etiqueta = 'Motivo' } = {}) {
+    return new Promise((ok) => {
+        let resuelto = false;
+        const m = modal({
+            titulo,
+            cuerpo: `<p style="white-space:pre-line;margin-bottom:14px">${esc(mensaje)}</p>
+                <div class="form"><div class="campo ancho">
+                    <label for="m-motivo">${esc(etiqueta)} *</label>
+                    <textarea id="m-motivo" placeholder="Queda registrado en la auditoría"></textarea>
+                </div></div>`,
+            acciones: [
+                { texto: 'Cancelar', onClick: () => { resuelto = true; ok(null); } },
+                { texto: textoOk, clase: 'btn-primario', onClick: (el) => {
+                    const v = el.querySelector('#m-motivo').value.trim();
+                    if (!v) { aviso('Escribe el motivo', 'error'); return false; }
+                    resuelto = true;
+                    ok(v);
+                } },
+            ],
+        });
+        m.el.querySelector('.modal-cab button').addEventListener('click', () => { if (!resuelto) ok(null); });
+    });
 }
 
 /* ------------------------------------------------------------------ Formato */
@@ -78,6 +104,13 @@ function fecha(v) {
     return `${Number(d)} ${meses[Number(m) - 1]} ${a}`;
 }
 const hoy = () => new Date().toISOString().slice(0, 10);
+function fechaHora(v) {
+    if (!v) return '—';
+    const d = new Date(v);
+    if (isNaN(d)) return fecha(v);
+    return `${fecha(d.toISOString())} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+const peso = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 
 const ESTADOS = {
     // equipos
@@ -109,7 +142,25 @@ const ESTADOS = {
     vencido: ['Vencido', 'rojo'], proximo: ['Próximo', 'naranja'], en_rango: ['En rango', 'verde'],
     // requisiciones
     surtida: ['Surtida', 'verde'],
+    // embudo de oportunidades
+    nuevo: ['Nuevo', 'gris'], calificado: ['Calificado', 'azul'], cotizado: ['Cotizado', 'naranja'],
+    negociacion: ['Negociación', 'violeta'], ganado: ['Ganado', 'verde'], perdido: ['Perdido', 'rojo'],
 };
+
+/* ------------------------------------------------------------------ Entidades con bitácora */
+const ENTIDADES_UI = {
+    cliente:      { etiqueta: 'Cliente', url: '/crm/clientes.html' },
+    renta:        { etiqueta: 'Renta', url: '/comercial/rentas.html' },
+    ot:           { etiqueta: 'Orden de trabajo', url: '/produccion/ordenes-trabajo.html' },
+    factura:      { etiqueta: 'Factura', url: '/comercial/facturacion.html' },
+    orden_compra: { etiqueta: 'Orden de compra', url: '/administracion/compras.html' },
+    equipo:       { etiqueta: 'Equipo', url: '/almacen/equipos.html' },
+};
+const TIPOS_ACTIVIDAD = [['llamada', 'Llamada'], ['visita', 'Visita'], ['correo', 'Correo'], ['tarea', 'Tarea'],
+    ['recoger_equipo', 'Recoger equipo'], ['entregar_equipo', 'Entregar equipo']];
+const tipoActividad = (t) => (TIPOS_ACTIVIDAD.find(([v]) => v === t) || [t, t])[1];
+/** Enlace directo al registro (cada página abre el detalle si viene ?id=). */
+const urlRegistro = (entidad, id) => `${(ENTIDADES_UI[entidad] || {}).url || '/dashboard.html'}?id=${id}`;
 function tag(estado, texto) {
     const [t, c] = ESTADOS[estado] || [estado, 'gris'];
     return `<span class="tag" style="--c: var(--${c})">${esc(texto || t)}</span>`;
@@ -256,14 +307,151 @@ function exportarCSV(nombre, columnas, filas) {
     URL.revokeObjectURL(a.href);
 }
 
+/* ------------------------------------------------------------------ Bitácora del registro (estilo chatter)
+   panelBitacora(contenedor, 'factura', 12): notas, adjuntos, actividades y
+   cambios de estado en una sola línea de tiempo. El backend decide si el rol
+   tiene derecho a verla (403 si la entidad no es de su área). */
+async function panelBitacora(contenedor, entidad, id) {
+    const el = typeof contenedor === 'string' ? document.querySelector(contenedor) : contenedor;
+    if (!el) return;
+    el.innerHTML = '<p class="tenue">Cargando bitácora…</p>';
+    let datos;
+    try {
+        datos = await api(`/bitacora/${entidad}/${id}`);
+    } catch (e) {
+        el.innerHTML = `<div class="vacio">${esc(e.message)}</div>`;
+        return;
+    }
+    const recargar = () => panelBitacora(el, entidad, id);
+    const pendientes = datos.actividades.filter((a) => !a.hecha);
+
+    // Notas, adjuntos, eventos y actividades cerradas en una sola línea de tiempo.
+    const linea = [
+        ...datos.notas.map((n) => ({ fecha: n.fecha, usuario: n.usuario, clase: 'nota', html: esc(n.texto) })),
+        ...datos.adjuntos.map((a) => ({ fecha: a.fecha, usuario: a.usuario, clase: 'adjunto',
+            html: `Adjuntó <button class="btn-texto" type="button" data-adjunto="${a.id}" data-nombre="${esc(a.nombre)}">${esc(a.nombre)}</button> <span class="tenue">(${peso(a.tamano)})</span>` })),
+        ...datos.eventos.map((v) => ({ fecha: v.fecha, usuario: v.usuario, clase: 'evento', html: esc(v.texto) })),
+        ...datos.actividades.filter((a) => a.hecha).map((a) => ({ fecha: a.fecha_hecha, usuario: a.asignado_nombre, clase: 'evento',
+            html: `Actividad completada: ${esc(tipoActividad(a.tipo))}${a.nota ? ' · ' + esc(a.nota) : ''}` })),
+    ].filter((x) => x.fecha).sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+
+    el.innerHTML = `
+        <div class="form" style="margin-bottom:6px">
+            <div class="campo ancho">
+                <label for="bit-texto">Nota</label>
+                <textarea id="bit-texto" placeholder="Escribe una nota para el equipo…"></textarea>
+            </div>
+            <div class="campo ancho" style="flex-direction:row;gap:8px;align-items:center;flex-wrap:wrap">
+                <input type="file" id="bit-archivo" aria-label="Adjuntar archivo" style="flex:1;min-width:200px">
+                <button class="btn btn-primario" type="button" id="bit-guardar">Agregar a la bitácora</button>
+                <button class="btn" type="button" id="bit-actividad">Programar actividad</button>
+            </div>
+        </div>
+        ${pendientes.length ? `<h4 style="margin:14px 0 6px">Actividades pendientes (${pendientes.length})</h4>
+            <ul class="linea-tiempo">${pendientes.map((a) => `<li>
+                <strong>${esc(tipoActividad(a.tipo))}</strong> · vence ${fecha(a.fecha_limite)}
+                <span class="tenue">· ${esc(a.asignado_nombre)}</span>
+                ${a.dias < 0 ? ' <span class="tag" style="--c: var(--rojo)">Vencida</span>' : ''}
+                <button class="btn btn-chico" type="button" data-hecha="${a.id}" style="margin-left:8px">Marcar hecha</button>
+                ${a.nota ? `<div>${esc(a.nota)}</div>` : ''}
+            </li>`).join('')}</ul>` : ''}
+        <h4 style="margin:14px 0 6px">Historial</h4>
+        <ul class="linea-tiempo">${linea.map((x) => `<li>
+            <span class="tenue">${fechaHora(x.fecha)}${x.usuario ? ' · ' + esc(x.usuario) : ''}</span>
+            <div>${x.html}</div>
+        </li>`).join('') || '<li class="tenue">Todavía no hay movimientos en la bitácora</li>'}</ul>`;
+
+    el.querySelector('#bit-guardar').onclick = async (e) => {
+        const boton = e.currentTarget;
+        const texto = el.querySelector('#bit-texto').value.trim();
+        const archivo = el.querySelector('#bit-archivo').files[0];
+        if (!texto && !archivo) return aviso('Escribe una nota o elige un archivo', 'error');
+        boton.disabled = true;
+        try {
+            if (texto) await api('/notas', { method: 'POST', body: { entidad, entidad_id: id, texto } });
+            if (archivo) {
+                const contenido = await new Promise((ok, falla) => {
+                    const fr = new FileReader();
+                    fr.onload = () => ok(String(fr.result).split(',').pop());
+                    fr.onerror = () => falla(new Error('No se pudo leer el archivo'));
+                    fr.readAsDataURL(archivo);
+                });
+                await api('/adjuntos', { method: 'POST', body: { entidad, entidad_id: id, nombre: archivo.name, tipo: archivo.type, contenido } });
+            }
+            aviso('Bitácora actualizada', 'ok');
+            await recargar();
+        } catch (err) { avisoError(err); } finally { boton.disabled = false; }
+    };
+
+    el.querySelector('#bit-actividad').onclick = () => dialogoActividad(entidad, id, recargar);
+
+    el.querySelectorAll('[data-hecha]').forEach((b) => {
+        b.onclick = async () => {
+            try {
+                await api(`/actividades/${b.dataset.hecha}/hecha`, { method: 'POST', body: { hecha: true } });
+                aviso('Actividad cerrada', 'ok');
+                await recargar();
+            } catch (err) { avisoError(err); }
+        };
+    });
+
+    el.querySelectorAll('[data-adjunto]').forEach((b) => {
+        b.onclick = () => descargarAdjunto(b.dataset.adjunto, b.dataset.nombre);
+    });
+}
+
+/** Los adjuntos se bajan con el token de sesión, no con un <a href> directo. */
+async function descargarAdjunto(id, nombre) {
+    try {
+        const res = await fetch(`/api/adjuntos/${id}`, { headers: { Authorization: `Bearer ${Sesion.token()}` } });
+        if (!res.ok) throw new Error('No se pudo descargar el adjunto');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(await res.blob());
+        a.download = nombre || 'adjunto';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    } catch (e) { avisoError(e); }
+}
+
+function dialogoActividad(entidad, entidadId, alTerminar) {
+    catalogos().then((cat) => {
+        const campos = [
+            { k: 'tipo', etiqueta: 'Tipo', tipo: 'select', vacio: false, opciones: TIPOS_ACTIVIDAD, defecto: 'tarea' },
+            { k: 'fecha_limite', etiqueta: 'Fecha límite', tipo: 'date', requerido: true, defecto: hoy() },
+            { k: 'asignado_a', etiqueta: 'Asignada a', tipo: 'select', vacio: false, ancho: true,
+                opciones: opciones(cat.usuarios || [], 'id', 'nombre'), defecto: (Sesion.usuario() || {}).id },
+            { k: 'nota', etiqueta: 'Nota', tipo: 'textarea', ancho: true },
+        ];
+        modal({
+            titulo: 'Programar actividad',
+            cuerpo: formulario(campos),
+            acciones: [{ texto: 'Cancelar' }, { texto: 'Programar', clase: 'btn-primario', onClick: async (m) => {
+                await api('/actividades', { method: 'POST', body: { ...leerFormulario(m, campos), entidad, entidad_id: entidadId } });
+                aviso('Actividad programada', 'ok');
+                if (alTerminar) await alTerminar();
+            } }],
+        });
+    }).catch(avisoError);
+}
+
+/** Abre el detalle del registro cuando se llega con ?id= desde Mis actividades. */
+function idDeUrl() {
+    const v = new URLSearchParams(location.search).get('id');
+    return v && /^\d+$/.test(v) ? v : null;
+}
+
 /* ------------------------------------------------------------------ Diálogo de pago (Facturación y Cobranza) */
-function dialogoPago(f, alTerminar) {
+async function dialogoPago(f, alTerminar) {
     const saldo = Math.round((f.total - f.pagado) * 100) / 100;
+    const cat = await catalogos();
     const campos = [
         { k: 'monto', etiqueta: 'Monto', tipo: 'number', paso: '0.01', requerido: true, defecto: saldo },
         { k: 'fecha', etiqueta: 'Fecha', tipo: 'date', defecto: hoy() },
         { k: 'metodo', etiqueta: 'Método', tipo: 'select', vacio: false, opciones: [['transferencia', 'Transferencia'], ['efectivo', 'Efectivo'], ['cheque', 'Cheque'], ['tarjeta', 'Tarjeta']] },
         { k: 'referencia', etiqueta: 'Referencia' },
+        { k: 'cuenta_bancaria_id', etiqueta: 'Cuenta bancaria', tipo: 'select', ancho: true,
+            vacio: 'Bancos (general)', opciones: opciones(cat.cuentas_bancarias || [], 'id', (b) => `${b.banco} ${b.numero_enmascarado}`),
+            ayuda: 'En efectivo el cobro entra a Caja, no al banco' },
     ];
     modal({
         titulo: `Registrar pago · ${f.folio}`,
@@ -274,4 +462,15 @@ function dialogoPago(f, alTerminar) {
             if (alTerminar) await alTerminar();
         } }],
     });
+}
+
+/** Anular un pago mal capturado (solo admin y administración). El motivo es obligatorio. */
+async function anularPago(pago, alTerminar) {
+    const motivo = await pedirMotivo(
+        `Se va a anular el pago de ${dinero(pago.monto)} del ${fecha(pago.fecha)}.\nSe genera una póliza de reversa y la factura recupera su saldo.`,
+        { titulo: 'Anular pago', textoOk: 'Anular pago', etiqueta: 'Motivo de la anulación' });
+    if (!motivo) return false;
+    const r = await api(`/pagos/${pago.id}/anular`, { method: 'POST', body: { motivo } });
+    aviso(`Pago anulado (reversa ${r.poliza_reversa}). Saldo: ${dinero(r.saldo)}`, 'ok');
+    if (alTerminar) await alTerminar();
 }

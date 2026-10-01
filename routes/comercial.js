@@ -3,7 +3,7 @@ const express = require('express');
 const { pool, tx, uno, todos, ruta, ErrorNegocio } = require('../lib/db');
 const { puede } = require('../lib/auth');
 const N = require('../lib/negocio');
-const { forzar } = require('./comun');
+const { forzar, auditarForzado } = require('./comun');
 
 const router = express.Router();
 
@@ -25,11 +25,15 @@ router.get('/rentas', puede('rentas'), ruta(async (req, res) => {
 
 router.post('/rentas', puede('rentas'), ruta(async (req, res) => {
     const b = req.body || {};
-    const r = await tx((c) => N.crearRenta(c, {
-        clienteId: b.cliente_id, equipoId: b.equipo_id, periodo: b.periodo, cantidadPeriodos: b.cantidad_periodos,
-        tarifa: b.tarifa, deposito: b.deposito, fechaInicio: b.fecha_inicio, notas: b.notas,
-        uid: req.usuario.id, forzar: forzar(req),
-    }));
+    const r = await tx(async (c) => {
+        const renta = await N.crearRenta(c, {
+            clienteId: b.cliente_id, equipoId: b.equipo_id, periodo: b.periodo, cantidadPeriodos: b.cantidad_periodos,
+            tarifa: b.tarifa, deposito: b.deposito, fechaInicio: b.fecha_inicio, notas: b.notas,
+            uid: req.usuario.id, forzar: forzar(req),
+        });
+        await auditarForzado(c, req, 'renta', renta.id);
+        return renta;
+    });
     res.status(201).json(r);
 }));
 
@@ -44,7 +48,12 @@ router.post('/rentas/:id/cancelar', puede('rentas'), ruta(async (req, res) => {
 }));
 
 router.post('/rentas/:id/facturar', puede('rentas'), ruta(async (req, res) => {
-    res.status(201).json(await tx((c) => N.facturarRenta(c, req.params.id, { uid: req.usuario.id, forzar: forzar(req) })));
+    res.status(201).json(await tx(async (c) => {
+        const f = await N.facturarRenta(c, req.params.id, { uid: req.usuario.id, forzar: forzar(req) });
+        await N.auditar(c, { uid: req.usuario.id, ip: req.ip, accion: 'crear', entidad: 'factura', entidadId: f.id, despues: f });
+        await auditarForzado(c, req, 'factura', f.id);
+        return f;
+    }));
 }));
 
 // =====================================================================
@@ -79,12 +88,25 @@ router.get('/facturas/:id', puede('facturacion', 'cobranza'), ruta(async (req, r
 // Factura manual (conceptos libres)
 router.post('/facturas', puede('facturacion'), ruta(async (req, res) => {
     const b = req.body || {};
-    res.status(201).json(await tx((c) => N.crearFactura(c, {
-        clienteId: b.cliente_id, origen: 'otro', conceptos: b.conceptos, notas: b.notas, uid: req.usuario.id, forzar: forzar(req) })));
+    res.status(201).json(await tx(async (c) => {
+        const f = await N.crearFactura(c, {
+            clienteId: b.cliente_id, origen: 'otro', conceptos: b.conceptos, notas: b.notas, uid: req.usuario.id, forzar: forzar(req) });
+        await N.auditar(c, { uid: req.usuario.id, ip: req.ip, accion: 'crear', entidad: 'factura', entidadId: f.id, despues: f });
+        await auditarForzado(c, req, 'factura', f.id);
+        return f;
+    }));
 }));
 
 router.post('/facturas/:id/cancelar', puede('facturacion'), ruta(async (req, res) => {
-    res.json(await tx((c) => N.cancelarFactura(c, req.params.id, { motivo: req.body.motivo, uid: req.usuario.id })));
+    res.json(await tx(async (c) => {
+        const antes = await uno(c, 'SELECT * FROM facturas WHERE id = $1', [req.params.id]);
+        const f = await N.cancelarFactura(c, req.params.id, { motivo: req.body.motivo, uid: req.usuario.id });
+        await N.auditar(c, {
+            uid: req.usuario.id, ip: req.ip, accion: 'cancelar', entidad: 'factura', entidadId: Number(req.params.id),
+            antes, despues: { ...f, motivo: req.body.motivo || null },
+        });
+        return f;
+    }));
 }));
 
 // =====================================================================
@@ -120,8 +142,13 @@ router.post('/traspasos', puede('traspasos'), ruta(async (req, res) => {
 
 router.post('/equipos/:id/vender', puede('facturacion'), ruta(async (req, res) => {
     const b = req.body || {};
-    res.status(201).json(await tx((c) => N.venderEquipo(c, req.params.id, {
-        clienteId: b.cliente_id, precio: b.precio, uid: req.usuario.id, forzar: forzar(req) })));
+    res.status(201).json(await tx(async (c) => {
+        const f = await N.venderEquipo(c, req.params.id, {
+            clienteId: b.cliente_id, precio: b.precio, uid: req.usuario.id, forzar: forzar(req) });
+        await N.auditar(c, { uid: req.usuario.id, ip: req.ip, accion: 'crear', entidad: 'factura', entidadId: f.id, despues: f });
+        await auditarForzado(c, req, 'factura', f.id);
+        return f;
+    }));
 }));
 
 module.exports = router;

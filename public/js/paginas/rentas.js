@@ -18,10 +18,32 @@ window.iniciar = async (cont) => {
         const b = e.target.closest('button');
         if (!b) return;
         const r = rentas.find((x) => String(x.id) === b.dataset.id);
-        ({ facturar, finalizar, cancelar })[b.dataset.acc]?.(r);
+        ({ facturar, finalizar, cancelar, detalle })[b.dataset.acc]?.(r);
     });
     await cargar();
+    const id = idDeUrl();
+    const r = id && rentas.find((x) => String(x.id) === id);
+    if (r) detalle(r);
 };
+
+function detalle(r) {
+    const [u, v] = TXT_PERIODO[r.periodo];
+    const m = modal({
+        titulo: `Renta ${r.folio}`, ancho: 820,
+        cuerpo: `<dl class="datos" style="margin-bottom:16px">
+                <dt>Cliente</dt><dd><strong>${esc(r.razon_social)}</strong></dd>
+                <dt>Equipo</dt><dd>${esc(r.numero_economico)} · ${esc(r.marca)} ${esc(r.modelo || '')}</dd>
+                <dt>Estado</dt><dd>${tag(r.estado)}</dd>
+                <dt>Periodo</dt><dd>${r.cantidad_periodos} ${r.cantidad_periodos === 1 ? u : v} a ${dinero(r.tarifa)} c/u</dd>
+                <dt>Vigencia</dt><dd>${fecha(r.fecha_inicio)} a ${fecha(r.fecha_fin)}</dd>
+                <dt>Importe</dt><dd><strong>${dinero(r.importe)}</strong>${r.deposito > 0 ? ` · depósito ${dinero(r.deposito)}` : ''}</dd>
+                <dt>Factura</dt><dd>${r.factura_folio ? esc(r.factura_folio) : '<span class="tenue">Sin facturar</span>'}</dd>
+            </dl>
+            <h4 style="margin:18px 0 8px">Bitácora</h4>
+            <div id="bitacora-renta"></div>`,
+    });
+    panelBitacora(m.el.querySelector('#bitacora-renta'), 'renta', r.id);
+}
 
 async function cargar() { rentas = await api('/rentas'); pintar(); }
 
@@ -46,6 +68,7 @@ function pintar() {
             { t: 'Estado', r: (r) => tag(r.estado) },
             { t: 'Factura', r: (r) => (r.factura_folio ? `${esc(r.factura_folio)}<div class="sub">${etiqueta(r.factura_estado)}</div>` : '<span class="tenue">Sin facturar</span>') },
             { t: '', clase: 'acciones', r: (r) => [
+                `<button class="btn btn-chico" type="button" data-acc="detalle" data-id="${r.id}">Ver</button>`,
                 !r.factura_id && r.estado !== 'cancelada' ? `<button class="btn btn-chico" type="button" data-acc="facturar" data-id="${r.id}">Facturar</button>` : '',
                 r.estado === 'activa' ? `<button class="btn btn-chico" type="button" data-acc="finalizar" data-id="${r.id}">Finalizar</button>` : '',
                 r.estado === 'activa' && !r.factura_id ? `<button class="btn btn-chico btn-peligro" type="button" data-acc="cancelar" data-id="${r.id}">Cancelar</button>` : '',

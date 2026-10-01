@@ -14,7 +14,8 @@
 SET client_min_messages TO WARNING;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-DROP TABLE IF EXISTS periodos_contables, poliza_movimientos, polizas,
+DROP TABLE IF EXISTS auditoria, actividades, adjuntos, notas, oportunidades,
+    periodos_contables, poliza_movimientos, polizas,
     cuentas_bancarias, cuentas_contables,
     pagos, factura_conceptos, facturas,
     requisicion_items, requisiciones,
@@ -426,16 +427,24 @@ CREATE TABLE factura_conceptos (
 -- =====================================================================
 --  ADMINISTRACIÓN · COBRANZA
 -- =====================================================================
+-- Un pago mal capturado no se borra: se anula (poliza de reversa + motivo),
+-- igual que las polizas manuales. cuenta_bancaria_id se guarda para que la
+-- reversa golpee exactamente la misma cuenta que el cobro original.
 CREATE TABLE pagos (
-    id              SERIAL PRIMARY KEY,
-    factura_id      INTEGER NOT NULL REFERENCES facturas(id) ON DELETE CASCADE,
-    fecha           DATE NOT NULL DEFAULT CURRENT_DATE,
-    monto           NUMERIC(12,2) NOT NULL CHECK (monto > 0),
-    metodo          VARCHAR(15) NOT NULL DEFAULT 'transferencia'
-                    CHECK (metodo IN ('transferencia','efectivo','cheque','tarjeta')),
-    referencia      VARCHAR(60),
-    usuario_id      INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
-    creado          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    id                  SERIAL PRIMARY KEY,
+    factura_id          INTEGER NOT NULL REFERENCES facturas(id) ON DELETE CASCADE,
+    fecha               DATE NOT NULL DEFAULT CURRENT_DATE,
+    monto               NUMERIC(12,2) NOT NULL CHECK (monto > 0),
+    metodo              VARCHAR(15) NOT NULL DEFAULT 'transferencia'
+                        CHECK (metodo IN ('transferencia','efectivo','cheque','tarjeta')),
+    referencia          VARCHAR(60),
+    cuenta_bancaria_id  INTEGER,
+    cancelado           BOOLEAN NOT NULL DEFAULT FALSE,
+    motivo_cancelacion  TEXT,
+    cancelado_por       INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    fecha_cancelacion   TIMESTAMP,
+    usuario_id          INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    creado              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- =====================================================================
@@ -469,6 +478,9 @@ CREATE TABLE cuentas_bancarias (
     activa              BOOLEAN NOT NULL DEFAULT TRUE,
     creado              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE pagos ADD CONSTRAINT fk_pagos_cuenta_bancaria
+    FOREIGN KEY (cuenta_bancaria_id) REFERENCES cuentas_bancarias(id) ON DELETE SET NULL;
 
 CREATE TABLE polizas (
     id          SERIAL PRIMARY KEY,
@@ -504,6 +516,106 @@ CREATE TABLE periodos_contables (
     fecha_cierre  TIMESTAMP,
     UNIQUE (anio, mes)
 );
+
+-- =====================================================================
+--  COLABORACION (bitacora por registro, estilo "chatter")
+--  notas, adjuntos y actividades cuelgan de cualquier registro de las
+--  entidades de abajo mediante (entidad, entidad_id). No hay FK real
+--  porque apuntan a seis tablas distintas; quien consulta la bitacora
+--  tiene que tener permiso de esa entidad (ver lib/auth.js#puedeEntidad).
+-- =====================================================================
+CREATE TABLE notas (
+    id          SERIAL PRIMARY KEY,
+    entidad     VARCHAR(15) NOT NULL
+                CHECK (entidad IN ('cliente','renta','ot','factura','orden_compra','equipo')),
+    entidad_id  INTEGER NOT NULL,
+    usuario_id  INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    texto       TEXT NOT NULL,
+    fecha       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_notas_entidad ON notas(entidad, entidad_id);
+
+-- El archivo vive en uploads/ (fuera de public/): solo se descarga por
+-- GET /api/adjuntos/:id, que vuelve a revisar el permiso de la entidad.
+CREATE TABLE adjuntos (
+    id          SERIAL PRIMARY KEY,
+    entidad     VARCHAR(15) NOT NULL
+                CHECK (entidad IN ('cliente','renta','ot','factura','orden_compra','equipo')),
+    entidad_id  INTEGER NOT NULL,
+    nombre      VARCHAR(200) NOT NULL,
+    ruta        TEXT NOT NULL,
+    tipo        VARCHAR(100),
+    tamano      INTEGER NOT NULL DEFAULT 0,
+    usuario_id  INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    fecha       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_adjuntos_entidad ON adjuntos(entidad, entidad_id);
+
+CREATE TABLE actividades (
+    id            SERIAL PRIMARY KEY,
+    entidad       VARCHAR(15) NOT NULL
+                  CHECK (entidad IN ('cliente','renta','ot','factura','orden_compra','equipo')),
+    entidad_id    INTEGER NOT NULL,
+    tipo          VARCHAR(20) NOT NULL
+                  CHECK (tipo IN ('llamada','visita','correo','tarea','recoger_equipo','entregar_equipo')),
+    asignado_a    INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+    fecha_limite  DATE NOT NULL DEFAULT CURRENT_DATE,
+    nota          TEXT,
+    hecha         BOOLEAN NOT NULL DEFAULT FALSE,
+    fecha_hecha   TIMESTAMP,
+    creado_por    INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    creado        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_actividades_entidad ON actividades(entidad, entidad_id);
+CREATE INDEX idx_actividades_pendientes ON actividades(asignado_a, hecha, fecha_limite);
+
+-- =====================================================================
+--  AUDITORIA
+--  Rastro de las operaciones sensibles (dinero, credito y accesos).
+--  'antes'/'despues' guardan el registro completo en JSONB; nunca se
+--  guardan hashes de contrasena (ver routes/comun.js#sinSecretos).
+-- =====================================================================
+CREATE TABLE auditoria (
+    id          SERIAL PRIMARY KEY,
+    usuario_id  INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    accion      VARCHAR(30) NOT NULL,
+    entidad     VARCHAR(30) NOT NULL,
+    entidad_id  INTEGER,
+    antes       JSONB,
+    despues     JSONB,
+    ip          VARCHAR(45),
+    fecha       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_auditoria_fecha ON auditoria(fecha DESC);
+CREATE INDEX idx_auditoria_entidad ON auditoria(entidad, entidad_id);
+
+-- =====================================================================
+--  CRM · EMBUDO DE OPORTUNIDADES
+--  Una oportunidad es de un cliente ya registrado o de un prospecto
+--  suelto (todavia sin ficha de cliente): por eso cliente_id es opcional.
+-- =====================================================================
+CREATE TABLE oportunidades (
+    id                     SERIAL PRIMARY KEY,
+    folio                  TEXT GENERATED ALWAYS AS ('OP-' || (1000 + id)) STORED,
+    cliente_id             INTEGER REFERENCES clientes(id) ON DELETE SET NULL,
+    prospecto              VARCHAR(160),
+    titulo                 VARCHAR(160) NOT NULL,
+    valor_estimado         NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (valor_estimado >= 0),
+    probabilidad           INTEGER NOT NULL DEFAULT 50 CHECK (probabilidad BETWEEN 0 AND 100),
+    etapa                  VARCHAR(12) NOT NULL DEFAULT 'nuevo'
+                           CHECK (etapa IN ('nuevo','calificado','cotizado','negociacion','ganado','perdido')),
+    responsable_id         INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+    fecha_cierre_estimada  DATE,
+    motivo_perdida         TEXT,
+    notas                  TEXT,
+    creado                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actualizado            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (cliente_id IS NOT NULL OR prospecto IS NOT NULL),
+    CHECK (etapa <> 'perdido' OR motivo_perdida IS NOT NULL)
+);
+CREATE TRIGGER trg_oportunidades_fecha BEFORE UPDATE ON oportunidades
+    FOR EACH ROW EXECUTE FUNCTION actualizar_fecha();
+CREATE INDEX idx_oportunidades_etapa ON oportunidades(etapa);
 
 -- =====================================================================
 --  DATOS MAESTROS

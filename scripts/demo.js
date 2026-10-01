@@ -213,8 +213,58 @@ async function main() {
             await c.query('INSERT INTO interacciones (cliente_id, usuario_id, tipo, descripcion) VALUES ($1,$2,$3,$4)',
                 [await cli(rfc), uid, tipo, desc]);
         }
+
+        // --- CRM · embudo de oportunidades ----------------------------------
+        const comercial = (await uno(c, `SELECT id FROM usuarios WHERE rol = 'comercial' LIMIT 1`)).id;
+        const oportunidades = [
+            ['LBA150312AB1', null, 'Renta anual de 3 montacargas para nave 2', 420000, 60, 'negociacion', 20, null],
+            ['TSM180522GH4', null, 'Renta de 2 equipos gas LP para temporada alta', 180000, 70, 'cotizado', 12, null],
+            ['AHI090807CD2', null, 'Contrato de mantenimiento preventivo anual', 96000, 40, 'calificado', 45, null],
+            [null, 'Agroindustrias del Valle', 'Prospecto: renta de montacargas para bodega nueva', 150000, 20, 'nuevo', 60, null],
+            ['CAL160918KL6', null, 'Venta de montacargas usado MG-009', 185000, 90, 'ganado', -3, null],
+            ['DLP120110EF3', null, 'Renta mensual de 1 equipo eléctrico', 38000, 0, 'perdido', -8, 'El cliente rentó con la competencia por precio'],
+        ];
+        for (const [rfc, prospecto, titulo, valor, prob, etapa, diasCierre, motivo] of oportunidades) {
+            await c.query(
+                `INSERT INTO oportunidades (cliente_id, prospecto, titulo, valor_estimado, probabilidad, etapa,
+                                            responsable_id, fecha_cierre_estimada, motivo_perdida)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8::date,$9)`,
+                [rfc ? await cli(rfc) : null, prospecto, titulo, valor, prob, etapa, comercial, dias(diasCierre), motivo]);
+        }
+
+        // --- Bitácora: notas, adjuntos y actividades en varios registros -----
+        const nota = (entidad, entidadId, texto, usuarioId = uid) =>
+            c.query('INSERT INTO notas (entidad, entidad_id, usuario_id, texto) VALUES ($1,$2,$3,$4)', [entidad, entidadId, usuarioId, texto]);
+        await nota('cliente', await cli('LBA150312AB1'), 'Pidieron que todas las facturas se manden también a cuentas por pagar de su corporativo.');
+        await nota('cliente', await cli('FCE110304IJ5'), 'Saldo vencido: se acordó plan de pago en dos parcialidades.');
+        await nota('renta', r1b.id, 'El cliente pidió que el equipo se quede en la nave 2, no en la 1.');
+        await nota('ot', fin.ot.id, 'El cilindro llegó con 3 días de retraso del proveedor.');
+        await nota('equipo', await eq('MG-006'), 'Revisar la fuga del cilindro en el próximo preventivo.');
+        await nota('orden_compra', oc.id, 'Se pidió factura con el RFC correcto; la primera venía mal.');
+
+        const actividad = async (entidad, entidadId, tipo, diasLimite, notaTxt, asignado = uid, hecha = false) => {
+            await c.query(
+                `INSERT INTO actividades (entidad, entidad_id, tipo, asignado_a, fecha_limite, nota, hecha, fecha_hecha, creado_por)
+                 VALUES ($1,$2,$3,$4,$5::date,$6,$7, CASE WHEN $7 THEN CURRENT_TIMESTAMP END, $8)`,
+                [entidad, entidadId, tipo, asignado, dias(diasLimite), notaTxt, hecha, uid]);
+        };
+        await actividad('cliente', await cli('FCE110304IJ5'), 'llamada', -4, 'Cobrar el saldo vencido', comercial);
+        await actividad('cliente', await cli('TSM180522GH4'), 'visita', 0, 'Llevar la cotización firmada', comercial);
+        await actividad('renta', r3.id, 'recoger_equipo', 2, 'Recoger MG-004 al terminar la renta');
+        await actividad('equipo', await eq('MG-006'), 'tarea', 5, 'Verificar que la fuga quedó resuelta');
+        await actividad('cliente', await cli('LBA150312AB1'), 'correo', -2, 'Mandar estado de cuenta del mes', comercial, true);
+
+        // --- Un pago mal capturado que se anula ------------------------------
+        const pagoMalo = await N.registrarPago(c, f2.id, {
+            monto: 5000, metodo: 'transferencia', referencia: 'SPEI 88999 (capturado por error)', uid, cuentaBancariaId: bbva.id });
+        await N.anularPago(c, pagoMalo.id, { motivo: 'Se capturó en la factura equivocada: el depósito era de otro cliente', uid });
+        await N.auditar(c, {
+            uid, ip: '127.0.0.1', accion: 'anular', entidad: 'pago', entidadId: pagoMalo.id,
+            antes: { monto: 5000, factura_id: f2.id },
+            despues: { motivo: 'Se capturó en la factura equivocada: el depósito era de otro cliente' },
+        });
     });
-    console.log('Movimientos de ejemplo cargados: rentas, servicios, facturas, pagos, compras, nómina e interacciones.');
+    console.log('Movimientos de ejemplo cargados: rentas, servicios, facturas, pagos, compras, nómina, CRM, bitácora y actividades.');
 }
 
 main()

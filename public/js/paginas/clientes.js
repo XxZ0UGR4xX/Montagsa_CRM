@@ -37,6 +37,8 @@ window.iniciar = async (cont) => {
         if (b.dataset.editar) editar(clientes.find((c) => String(c.id) === b.dataset.editar));
     });
     await cargar();
+    const id = idDeUrl();
+    if (id) await ficha(id);
 };
 
 async function cargar() {
@@ -97,6 +99,7 @@ async function ficha(id) {
                 <button type="button" data-p="rentas">Rentas (${c.rentas.length})</button>
                 <button type="button" data-p="facturas">Facturas (${c.facturas.length})</button>
                 <button type="button" data-p="servicios">Servicios (${c.servicios.length})</button>
+                <button type="button" data-p="bitacora">Bitácora</button>
             </div>
             <div data-panel="interacciones">
                 ${puedeInteractuar ? `<div class="form" style="margin-bottom:14px">
@@ -113,12 +116,18 @@ async function ficha(id) {
                 { t: 'Folio', k: 'folio' }, { t: 'Origen', k: 'origen' }, { t: 'Vence', r: (f) => fecha(f.fecha_vencimiento) },
                 { t: 'Total', num: true, r: (f) => dinero(f.total) }, { t: 'Saldo', num: true, r: (f) => dinero(f.total - f.pagado) }, { t: 'Estado', r: (f) => tag(f.estado) }] })}</div>
             <div data-panel="servicios" class="oculto">${tabla({ vacio: 'Sin servicios', filas: c.servicios, columnas: [
-                { t: 'Folio', k: 'folio' }, { t: 'Tipo', k: 'tipo' }, { t: 'Programado', r: (s) => fecha(s.fecha_programada) }, { t: 'Estado', r: (s) => tag(s.estado) }] })}</div>`,
+                { t: 'Folio', k: 'folio' }, { t: 'Tipo', k: 'tipo' }, { t: 'Programado', r: (s) => fecha(s.fecha_programada) }, { t: 'Estado', r: (s) => tag(s.estado) }] })}</div>
+            <div data-panel="bitacora" class="oculto"></div>`,
     });
+    let bitacoraLista = false;
     m.el.querySelectorAll('.pestanas button').forEach((b) => {
         b.onclick = () => {
             m.el.querySelectorAll('.pestanas button').forEach((x) => x.classList.toggle('activa', x === b));
             m.el.querySelectorAll('[data-panel]').forEach((p) => p.classList.toggle('oculto', p.dataset.panel !== b.dataset.p));
+            if (b.dataset.p === 'bitacora' && !bitacoraLista) {
+                bitacoraLista = true;
+                panelBitacora(m.el.querySelector('[data-panel="bitacora"]'), 'cliente', c.id);
+            }
         };
     });
     const g = m.el.querySelector('#i-guardar');

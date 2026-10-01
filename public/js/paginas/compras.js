@@ -16,6 +16,8 @@ window.iniciar = async (cont) => {
         await cambiarEstado(oc, b.dataset.acc);
     });
     await cargar();
+    const id = idDeUrl();
+    if (id) await detalle({ id });
 };
 
 async function cargar() {
@@ -51,7 +53,7 @@ async function cargar() {
 
 async function detalle(oc) {
     const o = await api(`/compras/${oc.id}`);
-    modal({
+    const m = modal({
         titulo: `Orden de compra ${o.folio}`, ancho: 760,
         cuerpo: `<dl class="datos" style="margin-bottom:14px">
                 <dt>Proveedor</dt><dd>${esc(o.proveedor)} ${o.proveedor_email ? `<span class="tenue">${esc(o.proveedor_email)}</span>` : ''}</dd>
@@ -61,8 +63,11 @@ async function detalle(oc) {
             ${tabla({ filas: o.items, columnas: [
                 { t: 'SKU', k: 'sku' }, { t: 'Refacción', k: 'nombre' }, { t: 'Cantidad', num: true, r: (i) => `${i.cantidad} ${esc(i.unidad)}` },
                 { t: 'Costo', num: true, r: (i) => dinero(i.costo_unitario) }, { t: 'Importe', num: true, r: (i) => dinero(i.cantidad * i.costo_unitario) }],
-                pie: `<td colspan="4" class="derecha">Total</td><td class="num">${dinero(o.total)}</td>` })}`,
+                pie: `<td colspan="4" class="derecha">Total</td><td class="num">${dinero(o.total)}</td>` })}
+            <h4 style="margin:18px 0 8px">Bitácora</h4>
+            <div id="bitacora-oc"></div>`,
     });
+    panelBitacora(m.el.querySelector('#bitacora-oc'), 'orden_compra', o.id);
 }
 
 async function cambiarEstado(oc, estado) {

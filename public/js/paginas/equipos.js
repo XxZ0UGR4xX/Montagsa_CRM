@@ -41,6 +41,8 @@ window.iniciar = async (cont) => {
         if (b && b.dataset.editar) editar(equipos.find((x) => String(x.id) === b.dataset.editar));
     });
     await cargar();
+    const id = idDeUrl();
+    if (id) await ver(id);
 };
 
 async function cargar() { equipos = await api('/equipos'); pintar(); }
@@ -79,7 +81,7 @@ function editar(eq) {
 
 async function ver(id) {
     const e = await api(`/equipos/${id}`);
-    modal({
+    const m = modal({
         titulo: `${e.numero_economico} · ${e.marca} ${e.modelo || ''}`, ancho: 860,
         cuerpo: `
             <dl class="datos" style="margin-bottom:16px">
@@ -99,6 +101,9 @@ async function ver(id) {
                 { t: 'Importe', num: true, r: (r) => dinero(r.importe) }, { t: 'Estado', r: (r) => tag(r.estado) }] })}
             <h4 style="margin:18px 0 8px">Órdenes de trabajo</h4>
             ${tabla({ vacio: 'Sin órdenes de trabajo', filas: e.servicios, columnas: [
-                { t: 'Folio', k: 'folio' }, { t: 'Tipo', k: 'tipo' }, { t: 'Descripción', k: 'descripcion' }, { t: 'Estado', r: (s) => tag(s.estado) }] })}`,
+                { t: 'Folio', k: 'folio' }, { t: 'Tipo', k: 'tipo' }, { t: 'Descripción', k: 'descripcion' }, { t: 'Estado', r: (s) => tag(s.estado) }] })}
+            <h4 style="margin:18px 0 8px">Bitácora</h4>
+            <div id="bitacora-equipo"></div>`,
     });
+    panelBitacora(m.el.querySelector('#bitacora-equipo'), 'equipo', e.id);
 }

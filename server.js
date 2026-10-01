@@ -11,6 +11,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || `http://localhost:${PORT}` }));
+// Los adjuntos de la bitácora viajan en base64 dentro del JSON, así que esa
+// ruta necesita más cuerpo que el resto (el segundo parser ya no reanaliza).
+app.use('/api/adjuntos', express.json({ limit: '8mb' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -30,6 +33,7 @@ app.use('/api', requireAuth, require('./routes/crm-almacen'));     // CRM + Alma
 app.use('/api', requireAuth, require('./routes/comercial'));       // Comercial
 app.use('/api', requireAuth, require('./routes/administracion'));  // Administración + Dashboard
 app.use('/api', requireAuth, require('./routes/produccion'));      // Producción
+app.use('/api', requireAuth, require('./routes/colaboracion'));    // Bitácora, actividades, auditoría y embudo
 
 app.use('/api', (req, res) => res.status(404).json({ error: `Ruta no encontrada: ${req.method} ${req.originalUrl}` }));
 
@@ -37,6 +41,7 @@ app.use('/api', (req, res) => res.status(404).json({ error: `Ruta no encontrada:
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
     if (err instanceof ErrorNegocio) return res.status(err.status).json({ error: err.message });
+    if (err.type === 'entity.too.large') return res.status(413).json({ error: 'El archivo o la petición pesan demasiado' });
     // Errores de PostgreSQL más comunes, en español
     const pg = {
         '23505': [409, 'Ya existe un registro con ese valor (duplicado)'],

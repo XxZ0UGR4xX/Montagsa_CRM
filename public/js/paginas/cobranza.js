@@ -19,7 +19,7 @@ window.iniciar = async (cont) => {
         { t: 'Vencimiento', k: 'fecha_vencimiento' }, { t: 'Días vencida', k: 'dias_vencida' }, { t: 'Total', k: 'total' }, { t: 'Saldo', k: 'saldo' }], datos.facturas);
     document.getElementById('panel').addEventListener('click', (e) => {
         const b = e.target.closest('button[data-id]');
-        if (b) dialogoPago(datos.facturas.find((f) => String(f.id) === b.dataset.id), async () => { await cargar(); pintar(pest); });
+        if (b) dialogoPago(datos.facturas.find((f) => String(f.id) === b.dataset.id), async () => { await cargar(); pintar(pest); }).catch(avisoError);
     });
     await cargar();
     pintar('cartera');

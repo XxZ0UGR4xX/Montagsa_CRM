@@ -1,8 +1,9 @@
 // routes/comun.js — Auth, usuarios, catálogos para formularios y utilidades de rutas
 const express = require('express');
 const bcrypt = require('bcrypt');
-const { pool, uno, todos, ruta, ErrorNegocio } = require('../lib/db');
+const { pool, tx, uno, todos, ruta, ErrorNegocio } = require('../lib/db');
 const { firmar, requireAuth, puede, seccionesDe, PERMISOS } = require('../lib/auth');
+const N = require('../lib/negocio');
 
 /** INSERT con solo los campos permitidos que vengan en el body. */
 async function insertar(db, tabla, campos, body) {
@@ -24,8 +25,29 @@ async function actualizar(db, tabla, id, campos, body) {
     return r;
 }
 
-/** Solo el admin puede usar "forzar" (autorizar crédito excedido o suspendido). */
-const forzar = (req) => req.usuario.rol === 'admin' && req.body && req.body.forzar === true;
+/**
+ * Solo el admin puede usar "forzar" (autorizar crédito excedido o suspendido),
+ * y siempre tiene que decir por qué: el motivo queda en auditoría.
+ */
+const forzar = (req) => {
+    if (!(req.usuario.rol === 'admin' && req.body && req.body.forzar === true)) return false;
+    if (!req.body.motivo_autorizacion || !String(req.body.motivo_autorizacion).trim()) {
+        throw new ErrorNegocio(400, 'Indica el motivo de la autorización de crédito');
+    }
+    return true;
+};
+
+/** Registra en auditoría quién autorizó un crédito excedido/suspendido y por qué. */
+async function auditarForzado(c, req, entidad, entidadId) {
+    if (!forzar(req)) return;
+    await N.auditar(c, {
+        uid: req.usuario.id, ip: req.ip, accion: 'autorizar_credito', entidad, entidadId,
+        despues: { motivo: String(req.body.motivo_autorizacion).trim() },
+    });
+}
+
+/** Nunca mandamos ni auditamos el hash de la contraseña. */
+const sinSecretos = (u) => { const { password_hash, ...resto } = u || {}; return resto; };
 
 const router = express.Router();
 
@@ -65,9 +87,13 @@ router.get('/usuarios', requireAuth, puede('usuarios'), ruta(async (req, res) =>
 router.post('/usuarios', requireAuth, puede('usuarios'), ruta(async (req, res) => {
     const { nombre, email, password, rol } = req.body || {};
     if (!nombre || !email || !password || password.length < 8) throw new ErrorNegocio(400, 'Nombre, correo y contraseña (mín. 8) son obligatorios');
-    const u = await uno(pool,
-        'INSERT INTO usuarios (nombre, email, password_hash, rol) VALUES ($1,$2,$3,$4) RETURNING id, nombre, email, rol, activo',
-        [nombre, email.trim().toLowerCase(), await bcrypt.hash(password, 10), rol || 'comercial']);
+    const u = await tx(async (c) => {
+        const nuevo = await uno(c,
+            'INSERT INTO usuarios (nombre, email, password_hash, rol) VALUES ($1,$2,$3,$4) RETURNING id, nombre, email, rol, activo',
+            [nombre, email.trim().toLowerCase(), await bcrypt.hash(password, 10), rol || 'comercial']);
+        await N.auditar(c, { uid: req.usuario.id, ip: req.ip, accion: 'crear', entidad: 'usuario', entidadId: nuevo.id, despues: nuevo });
+        return nuevo;
+    });
     res.status(201).json(u);
 }));
 
@@ -80,9 +106,19 @@ router.put('/usuarios/:id', requireAuth, puede('usuarios'), ruta(async (req, res
         if (body.password.length < 8) throw new ErrorNegocio(400, 'La contraseña debe tener al menos 8 caracteres');
         body.password_hash = await bcrypt.hash(body.password, 10);
     }
-    const u = await actualizar(pool, 'usuarios', req.params.id, ['nombre', 'email', 'rol', 'activo', 'password_hash'], body);
-    delete u.password_hash;
-    res.json(u);
+    const u = await tx(async (c) => {
+        const antes = await uno(c, 'SELECT * FROM usuarios WHERE id = $1', [req.params.id]);
+        if (!antes) throw new ErrorNegocio(404, 'Usuario no encontrado');
+        const despues = await actualizar(c, 'usuarios', req.params.id, ['nombre', 'email', 'rol', 'activo', 'password_hash'], body);
+        // Un cambio de rol es un cambio de permisos: se audita aparte para poder filtrarlo.
+        const accion = antes.rol !== despues.rol ? 'cambiar_permisos' : 'editar';
+        await N.auditar(c, {
+            uid: req.usuario.id, ip: req.ip, accion, entidad: 'usuario', entidadId: Number(req.params.id),
+            antes: sinSecretos(antes), despues: sinSecretos(despues),
+        });
+        return despues;
+    });
+    res.json(sinSecretos(u));
 }));
 
 // ------------------------------------------------------------- Catálogos para selects
@@ -122,7 +158,10 @@ router.get('/catalogos', requireAuth, ruta(async (req, res) => {
         out.cuentas_bancarias = await todos(pool, `SELECT id, banco, numero_enmascarado FROM cuentas_bancarias WHERE activa ORDER BY banco`);
     }
 
+    // Para asignar actividades: cualquier rol puede pasarle un recordatorio a otro.
+    out.usuarios = await todos(pool, `SELECT id, nombre, rol FROM usuarios WHERE activo ORDER BY nombre`);
+
     res.json(out);
 }));
 
-module.exports = { router, insertar, actualizar, forzar };
+module.exports = { router, insertar, actualizar, forzar, auditarForzado, sinSecretos };

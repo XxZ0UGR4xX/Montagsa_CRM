@@ -33,6 +33,8 @@ window.iniciar = async (cont) => {
         if (b) detalle(b.dataset.id);
     });
     await cargar();
+    const id = idDeUrl();
+    if (id) await detalle(id);
 };
 
 function pintarPestanasEstado() {
@@ -164,9 +166,12 @@ async function detalle(id) {
             ${o.margen || o.precio_cliente ? `<div class="aviso-caja" style="margin-top:12px">Margen: <strong>${dinero(o.margen)}</strong> · Precio al cliente: <strong>${dinero(o.precio_cliente)}</strong>
                 ${o.autorizado_por ? ` · Autorizó: <strong>${esc(o.autorizado_por)}</strong> (${fecha(o.fecha_autorizacion)})` : ''}</div>` : ''}
             ${o.requisicion ? `<div class="aviso-caja" style="margin-top:12px">Requisición <strong>${esc(o.requisicion.folio)}</strong>: ${tag(o.requisicion.estado)}
-                ${o.requisicion.estado === 'pendiente' ? ' · Almacén debe surtirla antes de cerrar la orden' : ''}</div>` : ''}`,
+                ${o.requisicion.estado === 'pendiente' ? ' · Almacén debe surtirla antes de cerrar la orden' : ''}</div>` : ''}
+            <h4 style="margin:18px 0 8px">Bitácora</h4>
+            <div id="bitacora-ot"></div>`,
         acciones,
     });
+    panelBitacora(m.el.querySelector('#bitacora-ot'), 'ot', o.id);
 
     const ev = m.el.querySelector('#ot-evaluar');
     if (ev) ev.onclick = async () => {

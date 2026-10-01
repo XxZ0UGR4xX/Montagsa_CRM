@@ -34,11 +34,17 @@ Es una versión aparte de TiendaTech (proyecto de Negocios Electrónicos) con el
 | | Cuentas por pagar | Órdenes de compra recibidas sin pagar, por antigüedad, con pago directo. |
 | | Cierre de periodo | Bloquea un mes a nuevas pólizas; solo admin puede reabrirlo. |
 | **CRM** | Clientes e interacciones | Ficha del cliente con etapa (prospecto, activo, frecuente, inactivo), saldo, rentas, facturas y bitácora de contactos. |
+| | Embudo de ventas | Oportunidades en tablero kanban por etapa (nuevo → calificado → cotizado → negociación → ganado/perdido), arrastrables, con total por columna. |
+| **Transversal** | Bitácora del registro | Notas, adjuntos y cambios de estado en una línea de tiempo dentro de clientes, rentas, OT, facturas, órdenes de compra y equipos. |
+| | Mis actividades | Recordatorios (llamada, visita, correo, tarea, recoger/entregar equipo) agrupados en vencidas, de hoy y próximas. Los ve cualquier rol. |
+| **Configuración** | Auditoría | Rastro de facturas, pagos, pólizas manuales, créditos, autorizaciones forzadas y cambios de usuario/permisos. Solo admin. |
 
 ## Reglas de negocio principales
 
 - **Traspasos permitidos:** disponible → renta / venta / reparación / baja · renta → disponible / reparación · venta → disponible / reparación / vendido · reparación → disponible / venta / baja. A *renta* solo se entra creando una renta y a *vendido* solo vendiendo (así siempre hay contrato o factura detrás).
-- **Crédito:** si el cliente tiene el crédito suspendido o la operación rebasa su límite, la renta o factura se bloquea. Solo el rol **admin** puede autorizarla.
+- **Crédito:** si el cliente tiene el crédito suspendido o la operación rebasa su límite, la renta o factura se bloquea. Solo el rol **admin** puede autorizarla, **siempre con un motivo escrito**, y la autorización queda en Auditoría con quién, cuándo, desde qué IP y por qué.
+- **Nada se borra, todo se revierte:** una factura se cancela con póliza de reversa, una póliza manual se cancela con póliza de reversa, y un pago mal capturado **se anula** (motivo obligatorio, póliza de reversa contra la misma cuenta de banco/caja, recálculo del estado de la factura y registro en auditoría). Anular pagos es exclusivo de `admin` y `administracion`.
+- **Bitácora por registro:** clientes, rentas, órdenes de trabajo, facturas, órdenes de compra y equipos llevan notas, adjuntos y actividades. La bitácora **no afloja la separación por áreas**: el backend (`puedeEntidad()` en `lib/auth.js`) la niega con 403 si el rol no tiene permiso de esa entidad, incluida la descarga de adjuntos.
 - **Contabilidad automática:** cada factura, pago, consumo de refacción, requisición surtida, recepción y pago de compra, venta de equipo, maniobra, venta de refacciones, nómina y depreciación mensual genera su póliza. La balanza y el balance general siempre deben cuadrar. Ningún mes **cerrado** admite pólizas nuevas.
 - **IVA cobrado/acreditado cuando se mueve el dinero, no cuando se factura:** el IVA de una venta pasa por "no cobrado" hasta que se recibe el pago; el de una compra pasa por "por acreditar" hasta que se le paga al proveedor.
 - **CRM automático:** un prospecto pasa a activo con su primera renta o factura, y a frecuente con 5 facturas.
@@ -49,12 +55,14 @@ Es una versión aparte de TiendaTech (proyecto de Negocios Electrónicos) con el
 
 | Rol | Ve |
 |---|---|
-| `admin` | Todo, incluidos usuarios y autorizaciones de crédito |
+| `admin` | Todo, incluidos usuarios, auditoría y autorizaciones de crédito |
 | `almacen` | Equipos (solo lectura), inventario, máximos/mínimos, movimientos, requisiciones |
-| `comercial` | Clientes, interacciones, equipos (solo lectura), rentas, cotizaciones, facturación y traspasos |
+| `comercial` | Clientes, interacciones, embudo de ventas, equipos (solo lectura), rentas, cotizaciones, facturación y traspasos |
 | `produccion` | Equipos (solo lectura), órdenes de trabajo, rondas, preventivos, maniobras, refacciones |
-| `administracion` | Clientes, facturación, compras, proveedores, cobranza, créditos, RRHH, máximos/mínimos y contabilidad (solo lectura de reportes; puede capturar pólizas manuales) |
+| `administracion` | Clientes, facturación, compras, proveedores, cobranza (incluida la anulación de pagos), créditos, RRHH, máximos/mínimos y contabilidad (solo lectura de reportes; puede capturar pólizas manuales) |
 | `contabilidad` | Dashboard, contabilidad (catálogo, pólizas, reportes), bancos, cuentas por pagar y cierre de periodo |
+
+**Mis actividades** la ve cualquier rol (son sus propios recordatorios). La **bitácora** de un registro la ve quien tenga permiso de esa entidad: cliente → `clientes`; renta → `rentas`; OT → `ordenes_trabajo`/`cotizaciones`; factura → `facturacion`/`cobranza`; orden de compra → `compras`/`cuentas_por_pagar`; equipo → `equipos`.
 
 Los permisos están en un solo lugar: `lib/auth.js` (`PERMISOS`); el `admin` aparece en todos los arreglos porque ve todo. Cada ruta del backend exige `puede('<seccion>')`, así que escribir la URL a mano no da acceso. El menú (`layout.js`) y el dashboard (`GET /dashboard`) solo muestran lo que el rol puede ver, y `GET /catalogos` recorta los campos según el rol (por ejemplo, Producción no recibe saldos ni límites de crédito de los clientes).
 
@@ -93,14 +101,16 @@ montagsa/
 ├── lib/
 │   ├── db.js              pool, transacciones, helpers
 │   ├── auth.js            JWT y permisos por sección
-│   └── negocio.js         reglas: traspasos, inventario, crédito, facturas, rentas, órdenes de trabajo, compras, nómina, pólizas, depreciación, cierre de periodo, cuentas bancarias
+│   └── negocio.js         reglas: traspasos, inventario, crédito, facturas, rentas, órdenes de trabajo, compras, nómina, pólizas, depreciación, cierre de periodo, cuentas bancarias, anulación de pagos, auditoría
 ├── routes/
 │   ├── comun.js           login, usuarios, catálogos (recortados por rol)
 │   ├── crm-almacen.js     clientes, interacciones, equipos, inventario, máximos/mínimos, requisiciones
 │   ├── comercial.js       rentas, facturación, traspasos, venta de equipo
 │   ├── produccion.js      órdenes de trabajo, cotizaciones (acción de Comercial), rondas, preventivos, maniobras, refacciones
-│   └── administracion.js  proveedores, compras, cobranza, créditos, RRHH, contabilidad, bancos, cuentas por pagar, cierre, dashboard
+│   ├── administracion.js  proveedores, compras, cobranza, créditos, RRHH, contabilidad, bancos, cuentas por pagar, cierre, dashboard
+│   └── colaboracion.js    bitácora (notas y adjuntos), actividades, auditoría, embudo de oportunidades
 ├── scripts/demo.js        datos de ejemplo usando las mismas reglas de negocio
+├── uploads/               adjuntos de la bitácora (fuera de public/, no versionado)
 └── public/
     ├── login.html, dashboard.html
     ├── almacen/  comercial/  produccion/  administracion/  crm/  config/
@@ -108,9 +118,11 @@ montagsa/
     └── js/ core.js, layout.js, crud.js, paginas/*.js
 ```
 
-## Base de datos (28 tablas)
+## Base de datos (33 tablas)
 
-`usuarios`, `clientes`, `interacciones`, `empleados`, `proveedores`, `equipos`, `traspasos`, `productos`, `movimientos_inventario`, `ordenes_compra`, `orden_compra_items`, `rentas`, `ordenes_trabajo`, `ot_refacciones`, `lecturas_horometro`, `config_preventivo`, `secuencia_preventivo`, `equipo_preventivo`, `requisiciones`, `requisicion_items`, `facturas`, `factura_conceptos`, `pagos`, `cuentas_contables`, `cuentas_bancarias`, `polizas`, `poliza_movimientos`, `periodos_contables`.
+`usuarios`, `clientes`, `interacciones`, `empleados`, `proveedores`, `equipos`, `traspasos`, `productos`, `movimientos_inventario`, `ordenes_compra`, `orden_compra_items`, `rentas`, `ordenes_trabajo`, `ot_refacciones`, `lecturas_horometro`, `config_preventivo`, `secuencia_preventivo`, `equipo_preventivo`, `requisiciones`, `requisicion_items`, `facturas`, `factura_conceptos`, `pagos`, `cuentas_contables`, `cuentas_bancarias`, `polizas`, `poliza_movimientos`, `periodos_contables`, `notas`, `adjuntos`, `actividades`, `auditoria`, `oportunidades`.
+
+`notas`, `adjuntos` y `actividades` cuelgan de cualquier registro con el par `(entidad, entidad_id)` — `cliente`, `renta`, `ot`, `factura`, `orden_compra` o `equipo` — sin FK real, porque apuntan a seis tablas distintas; el permiso lo revisa `puedeEntidad()` en cada consulta. `auditoria` guarda `antes`/`despues` en JSONB (nunca el hash de contraseña) con usuario, IP y fecha. `pagos` ganó `cuenta_bancaria_id` (para que la reversa golpee la misma cuenta del cobro) y las columnas de anulación.
 
 `cuentas_contables` es jerárquica (`padre_id`, `nivel`, `naturaleza`, `codigo_agrupador_sat`, `activa`); las subcuentas de banco se crean solas al registrar una cuenta en `cuentas_bancarias`. `periodos_contables` marca qué meses están cerrados a pólizas nuevas.
 
@@ -127,18 +139,24 @@ Todas bajo `/api`, con `Authorization: Bearer <token>` excepto login y salud.
 - Almacén: `GET|POST /equipos`, `GET|PUT /equipos/:id`, `GET|POST /productos`, `PUT /productos/:id`, `POST /productos/:id/movimiento`, `GET /movimientos`, `GET /maxmin`, `POST /maxmin/generar-oc`, `GET /requisiciones`, `GET /requisiciones/:id`, `POST /requisiciones/:id/surtir`
 - Comercial: `GET|POST /rentas`, `POST /rentas/:id/{finalizar|cancelar|facturar}`, `GET|POST /facturas`, `GET /facturas/:id`, `POST /facturas/:id/cancelar`, `GET|POST /traspasos`, `POST /equipos/:id/vender`, `GET /cotizaciones`, `POST /servicios/:id/{cotizacion-comercial|autorizar|rechazar}`, `GET /ot/pendientes-facturar`
 - Producción: `GET /ot`, `GET /ot/:id`, `GET|POST /servicios`, `POST /servicios/:id/{evaluacion|cotizacion-interna|refacciones|enviar-cotizacion|iniciar-ejecucion}`, `POST /ot/:id/{cerrar|cancelar|facturar}`, `GET|POST /rondas`, `GET /preventivos`, `POST /preventivos/:equipoId/generar`, `POST /preventivos/:id/cerrar`, `GET|PUT /config/preventivo`, `GET /config/secuencia-preventivo`, `PUT /config/secuencia-preventivo/:id`, `GET|POST /maniobras`, `POST /maniobras/:id/estado`, `GET|POST /refacciones-ot`, `GET /refacciones-ot/:id`
-- Administración: `GET|POST /proveedores`, `PUT /proveedores/:id`, `GET|POST /compras`, `GET /compras/:id`, `POST /compras/:id/{estado|pagar}`, `GET /cobranza`, `GET|POST /pagos`, `GET /creditos`, `PUT /creditos/:id`, `GET|POST /empleados`, `PUT /empleados/:id`, `POST /nomina`
+- Administración: `GET|POST /proveedores`, `PUT /proveedores/:id`, `GET|POST /compras`, `GET /compras/:id`, `POST /compras/:id/{estado|pagar}`, `GET /cobranza`, `GET|POST /pagos`, `POST /pagos/:id/anular`, `GET /creditos`, `PUT /creditos/:id`, `GET|POST /empleados`, `PUT /empleados/:id`, `POST /nomina`
 - Contabilidad: `GET /contabilidad/{cuentas|polizas|balanza|mayor|resultados|balance|iva-mes}`, `POST/PUT/DELETE /contabilidad/cuentas[/:id]`, `POST /contabilidad/polizas`, `POST /contabilidad/polizas/:id/cancelar`, `POST /contabilidad/depreciacion`
 - Bancos: `GET|POST /bancos`, `PUT /bancos/:id`, `GET /bancos/:id/movimientos`, `PUT /bancos/movimientos/:id/conciliar`, `POST /bancos/:id/comparar`
 - Cuentas por pagar: `GET /cuentas-por-pagar`
 - Cierre de periodo: `GET|POST /cierre`, `POST /cierre/reabrir`
+- Bitácora: `GET /bitacora/:entidad/:id`, `POST /notas`, `POST /adjuntos`, `GET /adjuntos/:id`
+- Actividades: `GET|POST /actividades`, `GET /actividades/pendientes`, `POST /actividades/:id/hecha`
+- Auditoría (solo admin): `GET /auditoria?usuario_id=&entidad=&accion=&desde=&hasta=`
+- Embudo CRM: `GET|POST /oportunidades`, `PUT /oportunidades/:id`, `POST /oportunidades/:id/etapa`
 - Otros: `GET /dashboard` (contenido según el rol), `GET /catalogos` (recortado según el rol), `GET /salud`
 
 ## Seguridad (mejoras respecto a TiendaTech)
 
 - Token **JWT firmado** con expiración de 8 h (antes era Base64 predecible). Cambia el secreto con la variable `JWT_SECRET`.
 - Todas las rutas de datos exigen sesión y permiso por sección.
-- Contraseñas con bcrypt y consultas parametrizadas.
+- Contraseñas con bcrypt y consultas parametrizadas; el hash nunca sale en una respuesta ni se guarda en auditoría.
+- **Auditoría** de las operaciones con dinero, crédito y accesos, con IP y el estado antes/después.
+- Los **adjuntos** se guardan en `uploads/` (fuera de `public/`): solo se bajan por `GET /api/adjuntos/:id`, que vuelve a revisar el permiso de la entidad. El nombre que manda el navegador nunca toca el disco (se guarda con un nombre generado, conservando solo la extensión).
 - La contraseña de la BD se puede dar con `PGPASSWORD` en lugar de dejarla en `db.config.js`.
 
 ## Ideas para las siguientes etapas

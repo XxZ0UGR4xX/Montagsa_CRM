@@ -5,7 +5,7 @@ const express = require('express');
 const { pool, tx, uno, todos, ruta, ErrorNegocio, redondear } = require('../lib/db');
 const { puede } = require('../lib/auth');
 const N = require('../lib/negocio');
-const { actualizar, forzar } = require('./comun');
+const { actualizar, forzar, auditarForzado } = require('./comun');
 
 const router = express.Router();
 
@@ -120,7 +120,12 @@ router.post('/ot/:id/cancelar', puede('ordenes_trabajo', 'cotizaciones'), ruta(a
 }));
 
 router.post('/ot/:id/facturar', puede('facturacion'), ruta(async (req, res) => {
-    res.status(201).json(await tx((c) => N.facturarOT(c, req.params.id, { uid: req.usuario.id, forzar: forzar(req) })));
+    res.status(201).json(await tx(async (c) => {
+        const f = await N.facturarOT(c, req.params.id, { uid: req.usuario.id, forzar: forzar(req) });
+        await N.auditar(c, { uid: req.usuario.id, ip: req.ip, accion: 'crear', entidad: 'factura', entidadId: f.id, despues: f });
+        await auditarForzado(c, req, 'factura', f.id);
+        return f;
+    }));
 }));
 
 // =====================================================================

@@ -2,7 +2,10 @@
 // Cada página define window.iniciar(contenedor, usuario) y pone data-seccion en <body>.
 
 const MENU = [
-    { grupo: null, items: [['dashboard', 'Tablero general', '/dashboard.html']] },
+    { grupo: null, items: [
+        ['dashboard', 'Tablero general', '/dashboard.html'],
+        ['actividades', 'Mis actividades', '/actividades.html'],
+    ] },
     { grupo: 'Almacén', items: [
         ['equipos', 'Equipos (flota)', '/almacen/equipos.html'],
         ['inventario', 'Inventario', '/almacen/inventario.html'],
@@ -36,9 +39,13 @@ const MENU = [
     ] },
     { grupo: 'CRM', items: [
         ['clientes', 'Clientes', '/crm/clientes.html'],
+        ['embudo', 'Embudo de ventas', '/crm/embudo.html'],
         ['interacciones', 'Interacciones', '/crm/interacciones.html'],
     ] },
-    { grupo: 'Configuración', items: [['usuarios', 'Usuarios y roles', '/config/usuarios.html']] },
+    { grupo: 'Configuración', items: [
+        ['usuarios', 'Usuarios y roles', '/config/usuarios.html'],
+        ['auditoria', 'Auditoría', '/config/auditoria.html'],
+    ] },
 ];
 
 const ROLES = { admin: 'Administrador', almacen: 'Almacén', comercial: 'Comercial', produccion: 'Producción', administracion: 'Administración', contabilidad: 'Contabilidad' };
@@ -79,7 +86,7 @@ async function arrancar() {
                 <div class="franja" aria-hidden="true"></div>
                 <nav class="nav" aria-label="Secciones">${nav}</nav>
                 <div class="barra-pie">
-                    <div class="usuario">${esc(yo.usuario.nombre)}</div>
+                    <div class="usuario">${esc(yo.usuario.nombre)} <span id="contador-actividades"></span></div>
                     <div class="rol">${ROLES[yo.usuario.rol] || yo.usuario.rol}</div>
                     <div class="acciones">
                         <button type="button" id="btn-tema">Tema</button>
@@ -103,10 +110,25 @@ async function arrancar() {
     };
     document.getElementById('btn-clave').onclick = cambiarClave;
 
+    await contarActividades();
+
     const cont = document.getElementById('contenido');
     if (typeof window.iniciar === 'function') {
         try { await window.iniciar(cont, yo.usuario); } catch (e) { avisoError(e); }
     }
+}
+
+/** Actividades propias pendientes, junto al nombre del usuario en el menú. */
+async function contarActividades() {
+    const caja = document.getElementById('contador-actividades');
+    if (!caja) return;
+    try {
+        const r = await api('/actividades/pendientes');
+        caja.innerHTML = r.pendientes
+            ? `<a href="/actividades.html" class="tag" style="--c: var(--${r.vencidas ? 'rojo' : 'naranja'})"
+                  title="${r.vencidas ? r.vencidas + ' vencida(s)' : 'Actividades pendientes'}">${r.pendientes}</a>`
+            : '';
+    } catch (e) { /* el contador nunca debe romper el menú */ }
 }
 
 function cambiarClave() {
